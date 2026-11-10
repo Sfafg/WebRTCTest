@@ -27,11 +27,22 @@ address — they can open the page served by the broadcaster
   dialog. Give your address (shown on the page) to everyone who should watch.
   Any number of viewers can connect at the same time; each gets its own
   peer connection carrying the same stream.
+- **Quality slider** — before or during a broadcast, pick *Low / Medium / High
+  / Ultra*. It caps the captured frame rate and downscales the encoded stream
+  (e.g. a 4K screen is encoded at 540p on *Medium*), plus limits the bitrate.
+  Changes apply live to every connected viewer and need no reconnection. Lower
+  presets are the main way to cut CPU/GPU usage on weak devices — both the
+  broadcaster (capture + encode) and viewers (decode + render) benefit.
 - **Watch** — pick *Watch broadcasts* and add the address of each broadcaster
   (e.g. `192.168.1.20:8080`). Every added address becomes its own live video
   tile, so one page can watch several broadcasts (or several tiles of the
-  same one) simultaneously. Tiles reconnect automatically if the broadcaster
-  restarts its stream.
+  same one) simultaneously. Drag a tile's top bar to move it, drag its
+  lower-right corner to resize it. Tiles reconnect automatically if the
+  broadcaster restarts its stream.
+- **Only streams** — the button above the stage hides all controls and expands
+  the stage to the whole window, leaving just the stream tiles (handy for a
+  clean presentation). Hover a tile to reveal its bar for moving/removing it;
+  press **Esc** or the floating button to exit.
 
 Signaling rendezvous happens at the broadcaster's server: viewers POST their
 offers there and poll it for answers and ICE candidates. Each connection is
@@ -51,3 +62,8 @@ to a new connection.
   Receiving (watching) works fine over plain HTTP.
 - Audio is shared only if the browser's share dialog offers it (screen or tab
   audio, depending on browser/OS).
+- Performance: without an SFU each viewer gets its own encoder on the
+  broadcaster, so many simultaneous viewers cost the broadcaster CPU. Use a
+  lower quality preset when broadcasting to several low-end machines at once.
+  The page also polls signaling less often once a connection is established to
+  save background CPU.

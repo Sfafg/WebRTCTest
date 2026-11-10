@@ -51,39 +51,123 @@
     color: #fff;
     font-size: 1rem;
     cursor: pointer;
+    white-space: nowrap;
   }
   button:disabled { opacity: 0.45; cursor: default; }
+  button.ghost { background: #232a32; color: #e8e8e8; }
   #stopBtn { background: #c0392b; }
 
-  .tiles {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-    gap: 14px;
-    margin-top: 16px;
+  .quality { margin-top: 16px; }
+  .quality .qhead { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+  .quality input[type="range"] {
+    width: 100%;
+    margin-top: 8px;
+    accent-color: #4f9cf9;
   }
-  .tile { border: 1px solid #2c343d; border-radius: 10px; overflow: hidden; background: #161b21; }
+
+  .stagebar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-top: 18px;
+  }
+  .stage {
+    position: relative;
+    height: 62vh;
+    min-height: 380px;
+    margin-top: 10px;
+    border: 1px dashed #2c343d;
+    border-radius: 10px;
+    overflow: hidden;
+    background: #0b0f13;
+  }
+  .stage:empty::before {
+    content: 'No streams yet.';
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #566573;
+    font-size: 0.9rem;
+  }
+
+  .tile {
+    position: absolute;
+    border: 1px solid #2c343d;
+    border-radius: 10px;
+    overflow: hidden;
+    background: #000;
+    box-shadow: 0 6px 22px rgba(0, 0, 0, 0.45);
+  }
+  .tile video {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    background: #000;
+  }
   .tile header {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 8px 10px;
-    border-bottom: 1px solid #232a32;
+    padding: 6px 8px;
+    background: linear-gradient(rgba(0, 0, 0, 0.72), rgba(0, 0, 0, 0));
+    z-index: 2;
+    cursor: grab;
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
   }
+  .tile header:active { cursor: grabbing; }
   .tile .meta { flex: 1; min-width: 0; }
   .tile .addr {
-    font-size: 0.72rem;
-    color: #8b98a5;
+    font-size: 0.7rem;
+    color: #b8c4cf;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
   }
-  .tile .status { font-size: 0.78rem; margin-top: 2px; }
-  .tile .rm { background: #2a3138; color: #e8e8e8; padding: 2px 10px; font-size: 0.9rem; }
-  .tile video { display: block; width: 100%; aspect-ratio: 16/9; background: #000; }
+  .tile .status { font-size: 0.76rem; margin-top: 2px; }
+  .tile .rm {
+    background: rgba(42, 49, 56, 0.9);
+    color: #e8e8e8;
+    padding: 2px 10px;
+    font-size: 0.85rem;
+  }
+  .tile .grip {
+    position: absolute;
+    right: 0;
+    bottom: 0;
+    width: 22px;
+    height: 22px;
+    cursor: nwse-resize;
+    z-index: 3;
+    touch-action: none;
+  }
+  .tile .grip::after {
+    content: '';
+    position: absolute;
+    right: 3px;
+    bottom: 3px;
+    width: 0;
+    height: 0;
+    border-style: solid;
+    border-width: 0 0 12px 12px;
+    border-color: transparent transparent rgba(79, 156, 249, 0.6) transparent;
+  }
 
   #preview {
     display: none;
     width: 100%;
+    max-height: 240px;
+    object-fit: contain;
     margin-top: 18px;
     border-radius: 10px;
     background: #000;
@@ -99,43 +183,93 @@
     font-size: 0.78rem;
     color: #7fa87f;
   }
+
+  /* ---- "Only streams" presentation mode ---- */
+  body.streams-only { overflow: hidden; }
+  body.streams-only #appChrome { display: none; }
+  body.streams-only .stage {
+    position: fixed;
+    inset: 0;
+    height: auto;
+    min-height: 0;
+    margin: 0;
+    border: 0;
+    border-radius: 0;
+    background: #000;
+    z-index: 40;
+  }
+  body.streams-only .tile { border-color: transparent; box-shadow: none; }
+  body.streams-only .tile header { opacity: 0; transition: opacity 0.12s; }
+  body.streams-only .tile:hover header { opacity: 1; }
+  #exitOnly {
+    position: fixed;
+    top: 12px;
+    right: 12px;
+    z-index: 60;
+    background: #2a3138;
+    color: #e8e8e8;
+    font-size: 0.85rem;
+    padding: 6px 12px;
+    opacity: 0.35;
+  }
+  #exitOnly:hover { opacity: 1; }
 </style>
 </head>
 <body>
   <div class="card">
-    <h1>WebRTC Screen Share</h1>
-    <div class="muted" id="myAddr">Detecting your address…</div>
+    <div id="appChrome">
+      <h1>WebRTC Screen Share</h1>
+      <div class="muted" id="myAddr">Detecting your address…</div>
 
-    <div class="modes">
-      <label id="modeWatchLabel"><input type="radio" name="mode" value="watch" checked> Watch broadcasts</label>
-      <label id="modeCastLabel"><input type="radio" name="mode" value="broadcast"> Broadcast my screen</label>
+      <div class="modes">
+        <label id="modeWatchLabel"><input type="radio" name="mode" value="watch" checked> Watch broadcasts</label>
+        <label id="modeCastLabel"><input type="radio" name="mode" value="broadcast"> Broadcast my screen</label>
+      </div>
+
+      <div id="watchPane">
+        <div class="muted">Add the address of each broadcaster you want to watch — every address becomes its own tile, and you can watch several at once.</div>
+        <div class="row" style="margin-top:10px">
+          <input type="text" id="watchAddr" placeholder="e.g. 192.168.1.20:8080" autocomplete="off" spellcheck="false">
+          <button id="addBtn">Add stream</button>
+        </div>
+      </div>
+
+      <div id="castPane" hidden>
+        <div class="muted">Pick what to share — everyone who adds your address (shown above) receives it. Any number of viewers can watch at the same time.</div>
+        <div class="muted" style="margin-top:8px">
+          Note: browsers only allow screen capture on localhost/HTTPS pages —
+          open this page as <b>http://localhost:8080</b> on the broadcasting machine.
+        </div>
+        <div class="quality">
+          <div class="qhead">
+            <span class="muted">Stream quality: <b id="qualityLabel">Medium</b></span>
+            <span class="muted" id="qualityHint"></span>
+          </div>
+          <input type="range" id="quality" min="0" max="3" step="1" value="1">
+          <div class="muted" style="margin-top:6px">
+            Lower quality = less CPU/GPU on the broadcaster and on viewers. Changes apply live to everyone watching.
+          </div>
+        </div>
+        <div class="row" style="margin-top:12px">
+          <button id="castBtn">Choose what to share &amp; broadcast</button>
+          <button id="stopBtn" hidden>Stop broadcast</button>
+        </div>
+        <video id="preview" autoplay playsinline muted controls></video>
+        <div id="castStatus"></div>
+        <div id="viewerCount"></div>
+        <div id="log"></div>
+      </div>
+
+      <div class="stagebar">
+        <span class="muted">Drag a stream&rsquo;s top bar to move it, drag its lower-right corner to resize.</span>
+        <button id="onlyBtn" class="ghost">Only streams</button>
+      </div>
     </div>
 
-    <div id="watchPane">
-      <div class="muted">Add the address of each broadcaster you want to watch — every address becomes its own live tile, and you can watch several at once.</div>
-      <div class="row" style="margin-top:10px">
-        <input type="text" id="watchAddr" placeholder="e.g. 192.168.1.20:8080" autocomplete="off" spellcheck="false">
-        <button id="addBtn">Add stream</button>
-      </div>
-      <div id="tiles" class="tiles"></div>
-    </div>
-
-    <div id="castPane" hidden>
-      <div class="muted">Pick what to share — everyone who adds your address (shown above) receives it. Any number of viewers can watch at the same time.</div>
-      <div class="muted" style="margin-top:8px">
-        Note: browsers only allow screen capture on localhost/HTTPS pages —
-        open this page as <b>http://localhost:8080</b> on the broadcasting machine.
-      </div>
-      <div class="row" style="margin-top:12px">
-        <button id="castBtn">Choose what to share &amp; broadcast</button>
-        <button id="stopBtn" hidden>Stop broadcast</button>
-      </div>
-      <video id="preview" autoplay playsinline muted controls></video>
-      <div id="castStatus"></div>
-      <div id="viewerCount"></div>
-      <div id="log"></div>
-    </div>
+    <div id="stage" class="stage"></div>
   </div>
+
+  <button id="exitOnly" hidden>Exit streams view (Esc)</button>
 
 <script>
 'use strict';
@@ -143,12 +277,28 @@
 const ICE_SERVERS = [{ urls: ['stun:stun.l.google.com:19302'] }];
 const POLL_MS = 600;
 const ANSWER_TIMEOUT_MS = 30000;
+const MIN_W = 200;
+const MIN_H = 140;
+
+// Quality presets for the outgoing stream. Keeping the encoded resolution,
+// frame rate and bitrate low is the single biggest CPU/GPU saving on both the
+// broadcaster (capture + encode) and viewers (decode + render).
+const QUALITY_PRESETS = [
+  { name: 'Low',    width: 640,  height: 360,  fps: 15, maxBitrate: 400000 },
+  { name: 'Medium', width: 960,  height: 540,  fps: 24, maxBitrate: 1000000 },
+  { name: 'High',   width: 1280, height: 720,  fps: 30, maxBitrate: 2000000 },
+  { name: 'Ultra',  width: 1920, height: 1080, fps: 30, maxBitrate: 4000000 },
+];
 
 const $ = (id) => document.getElementById(id);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const rand = () => Math.random().toString(36).slice(2, 10);
 const shortId = (s) => String(s).slice(0, 6);
 
+const stage = $('stage');
+const tiles = [];
+let zTop = 0;
+let tileSeq = 0;
 let myAddress = '';
 
 function log(msg) {
@@ -180,7 +330,6 @@ async function getJSON(url) {
 }
 
 // Poll `url` until `pick(data)` returns a non-null value. Returns that value.
-// Throws after too many network errors (peer unreachable) or after timeoutMs.
 async function pollUntil(url, pick, isStopped, timeoutMs) {
   const deadline = timeoutMs ? Date.now() + timeoutMs : Infinity;
   let errors = 0;
@@ -201,6 +350,96 @@ async function pollUntil(url, pick, isStopped, timeoutMs) {
   }
   throw new Error('cancelled');
 }
+
+// ======================= Tile layout (move / resize) =======================
+
+function applyTileRect(tile) {
+  tile.el.style.left = Math.round(tile.x) + 'px';
+  tile.el.style.top = Math.round(tile.y) + 'px';
+  tile.el.style.width = Math.round(tile.w) + 'px';
+  tile.el.style.height = Math.round(tile.h) + 'px';
+}
+
+function constrainTile(tile) {
+  const rect = stage.getBoundingClientRect();
+  const maxW = Math.max(MIN_W, rect.width);
+  const maxH = Math.max(MIN_H, rect.height);
+  tile.w = Math.min(Math.max(tile.w, MIN_W), maxW);
+  tile.h = Math.min(Math.max(tile.h, MIN_H), maxH);
+  tile.x = Math.min(Math.max(tile.x, 0), Math.max(0, rect.width - tile.w));
+  tile.y = Math.min(Math.max(tile.y, 0), Math.max(0, rect.height - tile.h));
+  applyTileRect(tile);
+}
+
+function bringToFront(tile) {
+  tile.el.style.zIndex = String(++zTop);
+}
+
+function startDrag(tile, e) {
+  if (e.button !== 0) return;
+  e.preventDefault();
+  const sx = e.clientX;
+  const sy = e.clientY;
+  const ox = tile.x;
+  const oy = tile.y;
+  const onMove = (ev) => {
+    tile.x = ox + (ev.clientX - sx);
+    tile.y = oy + (ev.clientY - sy);
+    constrainTile(tile);
+  };
+  const onUp = () => {
+    window.removeEventListener('pointermove', onMove);
+    window.removeEventListener('pointerup', onUp);
+    window.removeEventListener('pointercancel', onUp);
+  };
+  window.addEventListener('pointermove', onMove);
+  window.addEventListener('pointerup', onUp);
+  window.addEventListener('pointercancel', onUp);
+}
+
+function startResize(tile, e) {
+  if (e.button !== 0) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const sx = e.clientX;
+  const sy = e.clientY;
+  const ow = tile.w;
+  const oh = tile.h;
+  const onMove = (ev) => {
+    const rect = stage.getBoundingClientRect();
+    const maxW = Math.max(MIN_W, rect.width - tile.x);
+    const maxH = Math.max(MIN_H, rect.height - tile.y);
+    tile.w = Math.min(Math.max(ow + (ev.clientX - sx), MIN_W), maxW);
+    tile.h = Math.min(Math.max(oh + (ev.clientY - sy), MIN_H), maxH);
+    applyTileRect(tile);
+  };
+  const onUp = () => {
+    window.removeEventListener('pointermove', onMove);
+    window.removeEventListener('pointerup', onUp);
+    window.removeEventListener('pointercancel', onUp);
+  };
+  window.addEventListener('pointermove', onMove);
+  window.addEventListener('pointerup', onUp);
+  window.addEventListener('pointercancel', onUp);
+}
+
+function setStreamsOnly(on) {
+  document.body.classList.toggle('streams-only', on);
+  $('exitOnly').hidden = !on;
+  // The stage changes size when toggling, so re-fit every tile.
+  requestAnimationFrame(() => {
+    for (const t of tiles) constrainTile(t);
+  });
+}
+
+$('onlyBtn').addEventListener('click', () => setStreamsOnly(true));
+$('exitOnly').addEventListener('click', () => setStreamsOnly(false));
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && document.body.classList.contains('streams-only')) setStreamsOnly(false);
+});
+window.addEventListener('resize', () => {
+  for (const t of tiles) constrainTile(t);
+});
 
 // ======================= Viewer: stream tiles =======================
 
@@ -226,6 +465,7 @@ function addTile(rawAddress) {
   const rm = document.createElement('button');
   rm.className = 'rm';
   rm.textContent = '✕';
+  rm.title = 'Remove stream';
   header.append(meta, rm);
 
   const video = document.createElement('video');
@@ -233,11 +473,45 @@ function addTile(rawAddress) {
   video.playsInline = true;
   video.controls = true;
 
-  el.append(header, video);
-  $('tiles').append(el);
+  const grip = document.createElement('div');
+  grip.className = 'grip';
+  grip.title = 'Drag to resize';
 
-  const tile = { base, el, video, status, pc: null, removed: false, releaseHold: null, token: { stopped: false } };
+  el.append(video, header, grip);
+  stage.append(el);
+
+  const rect = stage.getBoundingClientRect();
+  const n = tileSeq++;
+  const tile = {
+    base,
+    el,
+    video,
+    status,
+    x: 16 + (n % 8) * 28,
+    y: 16 + (n % 8) * 28,
+    w: Math.max(MIN_W, Math.min(380, Math.round(rect.width * 0.45))),
+    h: Math.max(MIN_H, Math.min(260, Math.round(rect.height * 0.5))),
+    pc: null,
+    removed: false,
+    releaseHold: null,
+    token: { stopped: false },
+  };
+  applyTileRect(tile);
+  constrainTile(tile);
+  tiles.push(tile);
+  bringToFront(tile);
+
   rm.addEventListener('click', () => removeTile(tile));
+  header.addEventListener('pointerdown', (e) => {
+    if (e.target.closest('button')) return;
+    bringToFront(tile);
+    startDrag(tile, e);
+  });
+  grip.addEventListener('pointerdown', (e) => {
+    bringToFront(tile);
+    startResize(tile, e);
+  });
+
   runTileLoop(tile);
 }
 
@@ -251,6 +525,8 @@ function removeTile(tile) {
   if (tile.pc) { try { tile.pc.close(); } catch (_) {} tile.pc = null; }
   if (tile.releaseHold) tile.releaseHold();
   tile.el.remove();
+  const i = tiles.indexOf(tile);
+  if (i >= 0) tiles.splice(i, 1);
 }
 
 async function runTileLoop(tile) {
@@ -342,7 +618,73 @@ async function pollCasterIce(tile, sid, aid, token) {
       try { await tile.pc.addIceCandidate(c); }
       catch (_) { /* candidate for an already-dead attempt; safe to ignore */ }
     }
-    await sleep(POLL_MS);
+    // Once media is flowing, poll less often to save CPU on weak devices.
+    const connected = tile.pc && tile.pc.connectionState === 'connected';
+    await sleep(connected ? 2000 : POLL_MS);
+  }
+}
+
+// ======================= Stream quality =======================
+
+function currentPreset() {
+  return QUALITY_PRESETS[Number($('quality').value)] || QUALITY_PRESETS[1];
+}
+
+function updateQualityLabel() {
+  const p = currentPreset();
+  $('qualityLabel').textContent = p.name;
+  $('qualityHint').textContent =
+    p.width + '\u00d7' + p.height + ' \u00b7 ' + p.fps + ' fps \u00b7 ' + Math.round(p.maxBitrate / 1000) + ' kbps';
+}
+
+// Limit the capture itself (frame rate is supported everywhere; downscaling
+// of the capture track is optional and ignored where unsupported).
+async function applyCaptureConstraints(preset) {
+  const track = cast.stream && cast.stream.getVideoTracks()[0];
+  if (!track) return;
+  try { await track.applyConstraints({ frameRate: { max: preset.fps } }); } catch (_) {}
+  try { await track.applyConstraints({ width: { max: preset.width }, height: { max: preset.height } }); } catch (_) {}
+}
+
+// Downscale the encoded stream to the preset height, cap frame rate/bitrate.
+// This cuts encoder CPU/GPU a lot (a 4K screen gets encoded at e.g. 540p) and
+// makes viewers decode less, without requiring renegotiation.
+async function applyQualityToSender(sender, preset) {
+  let srcHeight = 0;
+  try {
+    const s = cast.stream.getVideoTracks()[0].getSettings();
+    srcHeight = s.height || 0;
+  } catch (_) {}
+  const scale = srcHeight > 0 ? Math.max(1, srcHeight / preset.height) : 1;
+
+  const build = (withFps) => {
+    const params = sender.getParameters();
+    if (!params.encodings || params.encodings.length === 0) params.encodings = [{}];
+    const enc = params.encodings[0];
+    enc.maxBitrate = preset.maxBitrate;
+    enc.scaleResolutionDownBy = scale;
+    if (withFps) enc.maxFramerate = preset.fps;
+    params.degradationPreference = 'balanced';
+    return params;
+  };
+  try {
+    await sender.setParameters(build(true));
+  } catch (_) {
+    // Some browsers reject maxFramerate in sender parameters — retry without.
+    try { await sender.setParameters(build(false)); } catch (_) {}
+  }
+}
+
+async function applyQuality() {
+  const preset = currentPreset();
+  if (!cast.running) return;
+  await applyCaptureConstraints(preset);
+  for (const pc of cast.pcs.values()) {
+    for (const sender of pc.getSenders()) {
+      if (sender.track && sender.track.kind === 'video') {
+        applyQualityToSender(sender, preset).catch(() => {});
+      }
+    }
   }
 }
 
@@ -358,8 +700,10 @@ async function startBroadcast() {
   if (cast.running) return;
 
   // The browser shows its native picker: entire screen, window or browser tab.
+  // Start at the selected quality's frame rate (lower = less CPU/GPU).
+  const preset = currentPreset();
   const stream = await navigator.mediaDevices.getDisplayMedia({
-    video: { frameRate: 30 },
+    video: { frameRate: { ideal: preset.fps, max: preset.fps } },
     audio: true,
   });
 
@@ -386,6 +730,8 @@ async function startBroadcast() {
   $('castStatus').textContent = myAddress
     ? 'Broadcasting — tell viewers to add ' + myAddress + ' on their page.'
     : 'Broadcasting — tell viewers to add this server\u2019s address on their page.';
+
+  applyQuality().catch(() => {});
 
   const offersToken = { stopped: false };
   const iceToken = { stopped: false };
@@ -429,6 +775,13 @@ async function acceptViewer(offer) {
     const s = pc.connectionState;
     if (s === 'connected') {
       log('Viewer ' + shortId(offer.aid) + ' connected.');
+      // Encoding parameters are only reliably accepted after negotiation.
+      const preset = currentPreset();
+      for (const sender of pc.getSenders()) {
+        if (sender.track && sender.track.kind === 'video') {
+          applyQualityToSender(sender, preset).catch(() => {});
+        }
+      }
       updateViewerCount();
     } else if (s === 'failed' || s === 'closed') {
       log('Viewer ' + shortId(offer.aid) + ' left.');
@@ -441,6 +794,10 @@ async function acceptViewer(offer) {
   await pc.setRemoteDescription({ type: 'offer', sdp: offer.sdp });
   await pc.setLocalDescription(await pc.createAnswer());
   await post('/signal/answer', { sid: cast.sid, aid: offer.aid, type: 'answer', sdp: pc.localDescription.sdp });
+  const preset = currentPreset();
+  for (const sender of pc.getSenders()) {
+    if (sender.track && sender.track.kind === 'video') applyQualityToSender(sender, preset).catch(() => {});
+  }
   log('Accepted viewer ' + shortId(offer.aid) + ' — waiting for it to connect.');
   updateViewerCount();
 }
@@ -468,7 +825,11 @@ async function pollViewerIce(token) {
       try { await pc.addIceCandidate(c.candidate); }
       catch (err) { log('addIceCandidate failed: ' + err.message); }
     }
-    await sleep(POLL_MS);
+    let allConnected = cast.pcs.size > 0;
+    for (const p of cast.pcs.values()) {
+      if (p.connectionState !== 'connected') { allConnected = false; break; }
+    }
+    await sleep(allConnected ? 2000 : POLL_MS);
   }
 }
 
@@ -517,6 +878,12 @@ $('castBtn').addEventListener('click', async () => {
   }
 });
 $('stopBtn').addEventListener('click', stopBroadcast);
+
+$('quality').addEventListener('input', () => {
+  updateQualityLabel();
+  applyQuality().catch(() => {});
+});
+updateQualityLabel();
 
 function updatePanes() {
   const mode = document.querySelector('input[name="mode"]:checked').value;
