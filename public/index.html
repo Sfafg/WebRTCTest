@@ -127,6 +127,13 @@
   }
   .tile header:active { cursor: grabbing; }
   .tile .meta { flex: 1; min-width: 0; }
+  .tile .nick {
+    font-size: 0.82rem;
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
   .tile .addr {
     font-size: 0.7rem;
     color: #b8c4cf;
@@ -134,13 +141,55 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
+  .tile .nickbar {
+    position: absolute;
+    top: 8px;
+    left: 8px;
+    z-index: 2;
+    max-width: calc(100% - 16px);
+    padding: 3px 10px;
+    border-radius: 999px;
+    background: rgba(0, 0, 0, 0.55);
+    color: #fff;
+    font-size: 0.78rem;
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    pointer-events: none;
+  }
+  /* The header (with the nick) is always visible normally; in "Only streams"
+     mode the floating nick badge takes over so the name still shows. */
+  body:not(.streams-only) .tile .nickbar { display: none; }
+  body.streams-only .tile:hover .nickbar { display: none; }
   .tile .status { font-size: 0.76rem; margin-top: 2px; }
+  .tile .pip,
   .tile .rm {
     background: rgba(42, 49, 56, 0.9);
     color: #e8e8e8;
     padding: 2px 10px;
     font-size: 0.85rem;
   }
+
+  .found {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 10px;
+    margin-top: 8px;
+    border: 1px solid #2c343d;
+    border-radius: 10px;
+    background: #141a20;
+  }
+  .found .meta { flex: 1; min-width: 0; }
+  .found .meta b { font-size: 0.9rem; }
+  .found .meta .muted {
+    font-size: 0.78rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .found button { padding: 6px 12px; font-size: 0.85rem; }
   .tile .grip {
     position: absolute;
     right: 0;
@@ -227,8 +276,16 @@
       </div>
 
       <div id="watchPane">
-        <div class="muted">Add the address of each broadcaster you want to watch — every address becomes its own tile, and you can watch several at once.</div>
-        <div class="row" style="margin-top:10px">
+        <div class="muted">Broadcasts found on your local network are listed below — click <b>Watch</b>. You can also add a broadcaster&rsquo;s address by hand; every address becomes its own tile, and you can watch several at once.</div>
+        <div class="quality" style="margin-top:12px">
+          <div class="qhead">
+            <span class="muted">Available broadcasts</span>
+            <button id="discoverBtn" class="ghost" style="padding:4px 10px; font-size:0.8rem">Refresh</button>
+          </div>
+          <div id="discovered"></div>
+          <div class="muted" id="discoverStatus" style="margin-top:8px">Looking for broadcasts&hellip;</div>
+        </div>
+        <div class="row" style="margin-top:14px">
           <input type="text" id="watchAddr" placeholder="e.g. 192.168.1.20:8080" autocomplete="off" spellcheck="false">
           <button id="addBtn">Add stream</button>
         </div>
@@ -259,7 +316,11 @@
       </div>
 
       <div id="castPane" hidden>
-        <div class="muted">Pick what to share — everyone who adds your address (shown above) receives it. Any number of viewers can watch at the same time.</div>
+        <div class="muted">Pick what to share — viewers on your network can pick it from their discovery list, or add your address (shown above). Any number of viewers can watch at the same time.</div>
+        <div class="row" style="margin-top:10px">
+          <input type="text" id="castNick" maxlength="40" placeholder="Your nickname — shown above your stream" autocomplete="off" spellcheck="false">
+        </div>
+        <div class="muted" style="margin-top:6px">Saved in this browser and shown above your stream (including picture-in-picture). Leave it empty to stay anonymous.</div>
         <div class="muted" style="margin-top:8px">
           Note: browsers only allow screen capture on localhost/HTTPS pages —
           open this page as <b>http://localhost:8080</b> on the broadcasting machine.
@@ -333,6 +394,25 @@ const $ = (id) => document.getElementById(id);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const rand = () => Math.random().toString(36).slice(2, 10);
 const shortId = (s) => String(s).slice(0, 6);
+
+// Nicknames persist in localStorage so they survive reloads and restarts.
+const NICK_KEY = 'screen-share.nick';
+
+function cleanNick(value) {
+  return String(value == null ? '' : value)
+    .replace(/[\u0000-\u001f\u007f]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 40);
+}
+
+function storedNick() {
+  try { return cleanNick(localStorage.getItem(NICK_KEY)); } catch (_) { return ''; }
+}
+
+function storeNick(value) {
+  try { localStorage.setItem(NICK_KEY, value); } catch (_) {}
+}
 
 const stage = $('stage');
 const tiles = [];
@@ -497,40 +577,60 @@ function addTile(rawAddress) {
   const header = document.createElement('header');
   const meta = document.createElement('div');
   meta.className = 'meta';
+  const nickEl = document.createElement('div');
+  nickEl.className = 'nick';
+  nickEl.hidden = true;
+  const addrText = base.replace(/^http:\/\//, '');
   const addr = document.createElement('div');
   addr.className = 'addr';
-  addr.textContent = base.replace(/^http:\/\//, '');
+  addr.textContent = addrText;
   const status = document.createElement('div');
   status.className = 'status';
-  meta.append(addr, status);
+  meta.append(nickEl, addr, status);
+  const pipBtn = document.createElement('button');
+  pipBtn.className = 'pip';
+  pipBtn.textContent = 'PiP';
+  pipBtn.title = 'Picture-in-picture (keeps the nickname visible)';
   const rm = document.createElement('button');
   rm.className = 'rm';
   rm.textContent = '✕';
   rm.title = 'Remove stream';
-  header.append(meta, rm);
+  header.append(meta, pipBtn, rm);
 
   const video = document.createElement('video');
   video.autoplay = true;
   video.playsInline = true;
   video.controls = true;
 
+  // Floating name badge: takes over when the header is hidden in "Only
+  // streams" mode, so the broadcaster's nick always shows above the stream.
+  const badge = document.createElement('div');
+  badge.className = 'nickbar';
+  badge.hidden = true;
+
   const grip = document.createElement('div');
   grip.className = 'grip';
   grip.title = 'Drag to resize';
 
-  el.append(video, header, grip);
+  el.append(video, header, badge, grip);
   stage.append(el);
 
   const rect = stage.getBoundingClientRect();
   const n = tileSeq++;
-  const label = addr.textContent + ' (#' + (n + 1) + ')';
+  const label = addrText + ' (#' + (n + 1) + ')';
   const tile = {
     base,
+    addrText,
     n,
     label,
     el,
     video,
     status,
+    nickEl,
+    badge,
+    nick: '',
+    pipWin: null,
+    pipBar: null,
     x: 16 + (n % 8) * 28,
     y: 16 + (n % 8) * 28,
     w: Math.max(MIN_W, Math.min(380, Math.round(rect.width * 0.45))),
@@ -548,6 +648,7 @@ function addTile(rawAddress) {
   refreshWantTargets();
 
   rm.addEventListener('click', () => removeTile(tile));
+  pipBtn.addEventListener('click', () => enterPip(tile));
   header.addEventListener('pointerdown', (e) => {
     if (e.target.closest('button')) return;
     bringToFront(tile);
@@ -565,9 +666,85 @@ function setTileStatus(tile, msg) {
   tile.status.textContent = msg;
 }
 
+// The broadcaster's nickname is shown in the tile header, in the floating
+// badge used by "Only streams" mode, and in the picture-in-picture window.
+function setTileNick(tile, raw) {
+  const nick = cleanNick(raw);
+  if (tile.nick === nick) return;
+  tile.nick = nick;
+  tile.nickEl.textContent = nick;
+  tile.nickEl.hidden = !nick;
+  tile.badge.textContent = nick;
+  tile.badge.hidden = !nick;
+  tile.label = (nick ? nick + ' \u00b7 ' : '') + tile.addrText + ' (#' + (tile.n + 1) + ')';
+  if (tile.pipWin && tile.pipBar) {
+    tile.pipBar.textContent = nick || 'Stream';
+    try { tile.pipWin.document.title = nick || 'Stream'; } catch (_) {}
+  }
+  refreshWantTargets();
+}
+
+// Document Picture-in-Picture lets us put a nickname bar above the video.
+// Browsers without it fall back to a plain video PiP window (no overlay).
+async function enterPip(tile) {
+  if (!tile.video.srcObject) {
+    setTileStatus(tile, 'Wait for the stream to start before using picture-in-picture.');
+    return;
+  }
+  const dpip = window.documentPictureInPicture;
+  if (!dpip || typeof dpip.requestWindow !== 'function') {
+    try {
+      if (document.pictureInPictureElement === tile.video) await document.exitPictureInPicture();
+      else await tile.video.requestPictureInPicture();
+      log('This browser only supports plain picture-in-picture, so the nickname cannot be overlaid.');
+    } catch (_) {
+      setTileStatus(tile, 'Picture-in-picture is not available in this browser.');
+    }
+    return;
+  }
+  if (tile.pipWin && !tile.pipWin.closed) {
+    try { tile.pipWin.focus(); } catch (_) {}
+    return;
+  }
+  let win;
+  try {
+    win = await dpip.requestWindow({ width: 520, height: 340 });
+  } catch (_) {
+    log('Could not open the picture-in-picture window (only one can be open at a time).');
+    return;
+  }
+  const doc = win.document;
+  doc.title = tile.nick || 'Stream';
+  const style = doc.createElement('style');
+  style.textContent = [
+    'html,body{margin:0;height:100%;background:#000;overflow:hidden;font-family:system-ui,-apple-system,"Segoe UI",sans-serif}',
+    'body{display:flex;flex-direction:column}',
+    '.bar{flex:0 0 auto;padding:6px 10px;background:#161b21;color:#e8e8e8;font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
+    'video{flex:1 1 auto;min-height:0;width:100%;object-fit:contain;background:#000;display:block}',
+  ].join('\n');
+  doc.head.append(style);
+  const bar = doc.createElement('div');
+  bar.className = 'bar';
+  bar.textContent = tile.nick || 'Stream';
+  doc.body.append(bar, tile.video);
+  tile.pipWin = win;
+  tile.pipBar = bar;
+  win.addEventListener('pagehide', () => {
+    tile.pipWin = null;
+    tile.pipBar = null;
+    if (tile.removed) return;
+    // Move the video back into its tile and keep its layout intact.
+    tile.el.insertBefore(tile.video, tile.el.firstChild);
+    constrainTile(tile);
+  });
+}
+
 function removeTile(tile) {
   tile.removed = true;
   tile.token.stopped = true;
+  if (tile.pipWin && !tile.pipWin.closed) { try { tile.pipWin.close(); } catch (_) {} }
+  tile.pipWin = null;
+  tile.pipBar = null;
   if (tile.pc) { try { tile.pc.close(); } catch (_) {} tile.pc = null; }
   if (tile.releaseHold) tile.releaseHold();
   tile.el.remove();
@@ -599,8 +776,10 @@ async function connectTile(tile, token) {
   if (tile.pc) { try { tile.pc.close(); } catch (_) {} tile.pc = null; }
   setTileStatus(tile, 'Waiting for broadcaster…');
 
-  const sid = await pollUntil(tile.base + '/signal/announce', (d) => d.sid, () => tile.removed || token.stopped);
+  const info = await pollUntil(tile.base + '/signal/announce', (d) => (d.sid ? d : null), () => tile.removed || token.stopped);
   if (tile.removed || token.stopped) return;
+  const sid = info.sid;
+  setTileNick(tile, info.nick);
 
   const aid = rand();
   const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
@@ -641,11 +820,12 @@ async function connectTile(tile, token) {
 
   const answer = await pollUntil(
     tile.base + '/signal/answer?sid=' + encodeURIComponent(sid) + '&aid=' + encodeURIComponent(aid),
-    (d) => d.data,
+    (d) => (d.data ? d : null),
     () => tile.removed || token.stopped,
     ANSWER_TIMEOUT_MS
   );
-  await pc.setRemoteDescription({ type: answer.type, sdp: answer.sdp });
+  setTileNick(tile, answer.nick);
+  await pc.setRemoteDescription({ type: answer.data.type, sdp: answer.data.sdp });
   setTileStatus(tile, 'Connecting…');
 
   pollCasterIce(tile, sid, aid, token); // background loop for this attempt
@@ -993,7 +1173,7 @@ async function logNegotiatedCodec(pc) {
 
 // ======================= Broadcaster =======================
 
-const cast = { running: false, sid: null, stream: null, pcs: new Map(), prefs: new Map(), tokens: [], uiTimer: null, codecLogged: false };
+const cast = { running: false, sid: null, nick: '', stream: null, pcs: new Map(), prefs: new Map(), tokens: [], uiTimer: null, codecLogged: false };
 
 function updateViewerCount() {
   let connected = 0;
@@ -1094,6 +1274,9 @@ function applyViewerQuality(aid, pc) {
 async function startBroadcast() {
   if (cast.running) return;
 
+  cast.nick = cleanNick($('castNick').value);
+  storeNick(cast.nick);
+
   // The browser shows its native picker: entire screen, window or browser tab.
   // Start at the selected frame rate (lower = less CPU/GPU).
   const settings = currentSettings();
@@ -1117,7 +1300,7 @@ async function startBroadcast() {
 
   updateQualityLabel(); // now that the native capture size is known
 
-  await post('/signal/announce', { sid: cast.sid });
+  await post('/signal/announce', { sid: cast.sid, nick: cast.nick });
 
   $('preview').srcObject = stream;
   $('preview').style.display = 'block';
@@ -1125,10 +1308,10 @@ async function startBroadcast() {
   $('stopBtn').hidden = false;
   $('log').textContent = '';
   updateViewerCount();
-  log('Broadcast started (session ' + shortId(cast.sid) + ').');
+  log('Broadcast started as \u201c' + (cast.nick || 'Anonymous') + '\u201d (session ' + shortId(cast.sid) + ').');
   $('castStatus').textContent = myAddress
-    ? 'Broadcasting — tell viewers to add ' + myAddress + ' on their page.'
-    : 'Broadcasting — tell viewers to add this server\u2019s address on their page.';
+    ? 'Broadcasting — nearby viewers can find you automatically; they can also add ' + myAddress + '.'
+    : 'Broadcasting — nearby viewers can find you automatically; otherwise give them this server\u2019s address.';
 
   applyQuality().catch(() => {});
   // Refresh the quality label and the encoding stats (skip work when hidden).
@@ -1334,6 +1517,24 @@ $('castBtn').addEventListener('click', async () => {
 });
 $('stopBtn').addEventListener('click', stopBroadcast);
 
+// Nickname: persisted locally, announced to the server, re-announced live when
+// changed so discovery lists and new viewers pick it up.
+cast.nick = storedNick();
+$('castNick').value = cast.nick;
+$('castNick').addEventListener('input', () => {
+  cast.nick = cleanNick($('castNick').value);
+  storeNick(cast.nick);
+});
+$('castNick').addEventListener('change', () => {
+  $('castNick').value = cleanNick($('castNick').value);
+  cast.nick = $('castNick').value;
+  storeNick(cast.nick);
+  if (!cast.running) return;
+  post('/signal/announce', { sid: cast.sid, nick: cast.nick })
+    .then(() => log('Nickname changed to \u201c' + (cast.nick || 'Anonymous') + '\u201d.'))
+    .catch(() => {});
+});
+
 for (const id of ['resolution', 'fps', 'bitrate']) {
   $(id).addEventListener('input', () => {
     updateQualityLabel();
@@ -1381,6 +1582,64 @@ $('wantTarget').addEventListener('change', loadWantForTarget);
 wantDefaults = wantSettings();
 refreshWantTargets();
 updateWantLabel();
+
+// ======================= Discovery =======================
+
+// A server advertises its active broadcast over UDP; every server collects
+// those announcements and exposes them at /discover. This page polls that list
+// and offers one click per broadcast, no addresses to type.
+let discoverSig = '';
+
+function renderDiscovered(list) {
+  const box = $('discovered');
+  const status = $('discoverStatus');
+  const items = list.slice().sort((a, b) => (a.nick || '~').localeCompare(b.nick || '~'));
+  const sig = items.map((b) => b.sid + '|' + b.address + '|' + b.nick).join('\n');
+  status.textContent = items.length
+    ? ''
+    : 'No broadcasts found yet — start one on this machine or LAN, or add an address manually.';
+  if (sig === discoverSig) return;
+  discoverSig = sig;
+  box.textContent = '';
+  for (const b of items) {
+    const row = document.createElement('div');
+    row.className = 'found';
+    const meta = document.createElement('div');
+    meta.className = 'meta';
+    const name = document.createElement('b');
+    name.textContent = b.nick || 'Anonymous';
+    const addr = document.createElement('div');
+    addr.className = 'muted';
+    addr.textContent = b.address + (b.local ? ' \u00b7 this server' : '');
+    meta.append(name, addr);
+    const btn = document.createElement('button');
+    btn.textContent = 'Watch';
+    btn.addEventListener('click', () => {
+      try { addTile(b.address); } catch (err) { alert(err.message); }
+    });
+    row.append(meta, btn);
+    box.append(row);
+  }
+}
+
+async function pollDiscovery() {
+  if (document.hidden || document.body.classList.contains('streams-only')) return;
+  try {
+    const d = await getJSON('/discover');
+    const list = Array.isArray(d.broadcasts) ? d.broadcasts : [];
+    renderDiscovered(list);
+    // Keep tile nicknames live (matched by broadcast session id).
+    for (const b of list) {
+      for (const tile of tiles) {
+        if (tile.sid && tile.sid === b.sid) setTileNick(tile, b.nick);
+      }
+    }
+  } catch (_) { /* transient error or older server; try again next tick */ }
+}
+
+$('discoverBtn').addEventListener('click', pollDiscovery);
+setInterval(pollDiscovery, 3000);
+pollDiscovery();
 
 function updatePanes() {
   const mode = document.querySelector('input[name="mode"]:checked').value;

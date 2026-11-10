@@ -16,12 +16,21 @@ const http = require('http');
 const os = require('os');
 const fs = require('fs');
 const path = require('path');
+const dgram = require('dgram');
 
 const PORT = Number(process.env.PORT) || 8080;
 const PUBLIC_DIR = path.join(__dirname, 'public');
 
+// LAN auto-discovery: every server advertises its active broadcast over UDP so
+// viewers can list broadcasts without typing addresses. Set DISCOVERY=0 to
+// turn it off (the manual "add address" flow keeps working either way).
+const DISCOVERY_PORT = Number(process.env.DISCOVERY_PORT) || 41234;
+const DISCOVERY_TTL_MS = 10000;
+const INSTANCE_ID = Math.random().toString(36).slice(2, 12);
+
 // All signaling state, scoped to the broadcaster's session id (sid):
 //   sid        current broadcast session id (null = nobody broadcasting)
+//   nick       broadcaster's nickname (shown above the stream)
 //   offers     viewer offers:      [{ sid, aid, type, sdp }]
 //   answers    per viewer:         `${sid}/${aid}` -> { type, sdp }
 //   casterIce  broadcaster->viewer `${sid}/${aid}` -> [candidateInit...]
@@ -29,6 +38,7 @@ const PUBLIC_DIR = path.join(__dirname, 'public');
 //   prefs      viewer quality wishes [{ sid, aid, res, fps, bitrate }]
 const signal = {
   sid: null,
+  nick: '',
   offers: [],
   answers: {},
   casterIce: {},
@@ -36,13 +46,104 @@ const signal = {
   prefs: [],
 };
 
-function resetSession(sid) {
+function resetSession(sid, nick) {
   signal.sid = sid;
+  signal.nick = nick || '';
   signal.offers = [];
   signal.answers = {};
   signal.casterIce = {};
   signal.viewerIce = [];
   signal.prefs = [];
+}
+
+function cleanNick(value) {
+  return String(value == null ? '' : value)
+    .replace(/[\u0000-\u001f\u007f]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 40);
+}
+
+// ---- LAN discovery peers (other servers advertising their broadcasts) ----
+const peers = new Map(); // instance id -> { address, port, sid, nick, seen }
+let discoverySocket = null;
+
+function broadcastTargets() {
+  const targets = new Set(['255.255.255.255', '127.0.0.1']);
+  for (const list of Object.values(os.networkInterfaces())) {
+    for (const net of list || []) {
+      const isV4 = net.family === 'IPv4' || net.family === 4;
+      if (!isV4 || net.internal || !net.netmask) continue;
+      const ip = net.address.split('.').map(Number);
+      const mask = net.netmask.split('.').map(Number);
+      if (ip.length !== 4 || mask.length !== 4) continue;
+      targets.add(ip.map((octet, i) => (octet | (~mask[i] & 255))).join('.'));
+    }
+  }
+  return [...targets];
+}
+
+function sendDiscovery() {
+  if (!discoverySocket) return;
+  const payload = Buffer.from(JSON.stringify({
+    app: 'webrtc-screen-share',
+    instance: INSTANCE_ID,
+    port: PORT,
+    sid: signal.sid,
+    nick: signal.nick || '',
+  }));
+  for (const target of broadcastTargets()) {
+    try {
+      discoverySocket.send(payload, 0, payload.length, DISCOVERY_PORT, target, () => {});
+    } catch (_) { /* interface unavailable / broadcast blocked */ }
+  }
+}
+
+function onDiscoveryMessage(buf, rinfo) {
+  let m;
+  try { m = JSON.parse(buf.toString()); } catch (_) { return; }
+  if (!m || m.app !== 'webrtc-screen-share' || m.instance === INSTANCE_ID) return;
+  const instance = String(m.instance || '');
+  if (!instance) return;
+  if (m.sid === null || m.sid === undefined) {
+    for (const [key, peer] of peers) if (peer.instance === instance) peers.delete(key);
+    return;
+  }
+  if (typeof m.sid !== 'string' || !m.sid) return;
+  const port = Number(m.port) || 0;
+  if (!port) return;
+  // One entry per source interface: the same broadcast arrives both over
+  // loopback and over each LAN interface; /discover prefers the LAN address.
+  peers.set(instance + '@' + rinfo.address, {
+    instance,
+    address: rinfo.address + ':' + port,
+    port,
+    sid: m.sid,
+    nick: cleanNick(m.nick),
+    seen: Date.now(),
+  });
+}
+
+function startDiscovery() {
+  if (process.env.DISCOVERY === '0') return;
+  try {
+    const sock = dgram.createSocket({ type: 'udp4', reuseAddr: true });
+    sock.on('message', onDiscoveryMessage);
+    sock.on('error', () => { /* discovery is best effort */ });
+    sock.bind(DISCOVERY_PORT, () => {
+      try { sock.setBroadcast(true); } catch (_) {}
+    });
+    discoverySocket = sock;
+  } catch (_) {
+    discoverySocket = null;
+  }
+  setInterval(() => {
+    const now = Date.now();
+    for (const [key, peer] of peers) {
+      if (now - peer.seen > DISCOVERY_TTL_MS) peers.delete(key);
+    }
+    if (signal.sid) sendDiscovery();
+  }, 3000).unref();
 }
 
 const MIME = {
@@ -122,18 +223,23 @@ const server = http.createServer(async (req, res) => {
   if (url.pathname.startsWith('/signal/')) {
     const q = url.searchParams;
     try {
-      // Broadcaster: start (new sid) / stop (sid=null) a broadcast.
+      // Broadcaster: start (new sid) / stop (sid=null) a broadcast. Re-posting
+      // the same sid only renames the broadcast, keeping viewers connected.
       if (req.method === 'POST' && url.pathname === '/signal/announce') {
         const body = await readJSON(req);
         let sid = body.sid === undefined ? null : body.sid;
         if (sid !== null && (typeof sid !== 'string' || !sid.trim())) {
           return json(res, 400, { error: 'sid must be a non-empty string or null' });
         }
-        resetSession(sid ? sid.trim() : null);
-        return json(res, 200, { ok: true, sid: signal.sid });
+        sid = sid ? sid.trim() : null;
+        const nick = cleanNick(body.nick);
+        if (sid !== signal.sid) resetSession(sid, nick);
+        else signal.nick = nick;
+        sendDiscovery(); // advertise (or withdraw) immediately
+        return json(res, 200, { ok: true, sid: signal.sid, nick: signal.nick });
       }
       if (req.method === 'GET' && url.pathname === '/signal/announce') {
-        return json(res, 200, { sid: signal.sid });
+        return json(res, 200, { sid: signal.sid, nick: signal.nick || '' });
       }
 
       // Viewer -> broadcaster: post an offer for one connection attempt.
@@ -184,7 +290,7 @@ const server = http.createServer(async (req, res) => {
       // Viewer: poll for the answer to own offer.
       if (req.method === 'GET' && url.pathname === '/signal/answer') {
         const data = q.get('sid') === signal.sid ? signal.answers[q.get('sid') + '/' + q.get('aid')] || null : null;
-        return json(res, 200, { data });
+        return json(res, 200, { data, nick: data ? signal.nick || '' : null });
       }
 
       // Broadcaster: post own ICE candidates for one viewer attempt.
@@ -231,6 +337,30 @@ const server = http.createServer(async (req, res) => {
     return json(res, 200, { port: PORT, ips: localIPv4s() });
   }
 
+  // Everything viewers can watch right now: this server's own broadcast plus
+  // broadcasts advertised by other servers on the LAN over UDP.
+  if (req.method === 'GET' && url.pathname === '/discover') {
+    const now = Date.now();
+    const bySid = new Map();
+    for (const peer of peers.values()) {
+      if (now - peer.seen > DISCOVERY_TTL_MS) continue;
+      const prev = bySid.get(peer.sid);
+      // Same broadcast may arrive via loopback and a LAN interface; prefer LAN.
+      if (!prev || (prev.address.startsWith('127.') && !peer.address.startsWith('127.'))) {
+        bySid.set(peer.sid, peer);
+      }
+    }
+    const broadcasts = [];
+    for (const peer of bySid.values()) {
+      broadcasts.push({ address: peer.address, sid: peer.sid, nick: peer.nick, local: false });
+    }
+    if (signal.sid) {
+      const host = req.headers.host && /^[^/\\\s]+$/.test(req.headers.host) ? req.headers.host : 'localhost:' + PORT;
+      broadcasts.unshift({ address: host, sid: signal.sid, nick: signal.nick || '', local: true });
+    }
+    return json(res, 200, { broadcasts, discovery: Boolean(discoverySocket) });
+  }
+
   // ---- static files ----
   if (req.method !== 'GET') {
     res.writeHead(405, { 'Content-Type': 'text/plain' });
@@ -261,6 +391,8 @@ const server = http.createServer(async (req, res) => {
     res.end(data);
   });
 });
+
+startDiscovery();
 
 server.listen(PORT, () => {
   console.log('WebRTC screen-share app');

@@ -19,14 +19,21 @@ Run the server on the **broadcasting** machine (Node.js 14+, no
 Then open **http://localhost:8080** there. Viewers only need the broadcaster's
 address — they can open the page served by the broadcaster
 (`http://<broadcaster-ip>:8080`) and don't need to run anything themselves.
+Broadcasts are also advertised automatically on the local network (UDP port
+41234): each page lists the broadcasts its own server can see, so viewers can
+usually just click **Watch** instead of typing an address. Set `DISCOVERY=0`
+to disable advertising/listening, or `DISCOVERY_PORT=...` to use another port.
 
 ## Use
 
-- **Broadcast** — pick *Broadcast my screen*, click **Choose what to share &
+- **Broadcast** — pick *Broadcast my screen*, set a **nickname** (stored in the
+  browser, so it survives reloads), click **Choose what to share &
   broadcast**, and select entire screen / window / browser tab in the browser's
   dialog. Give your address (shown on the page) to everyone who should watch.
   Any number of viewers can connect at the same time; each gets its own
-  peer connection carrying the same stream.
+  peer connection carrying the same stream. The nickname is shown above the
+  stream on every viewer's tile, in *Only streams* mode as a floating badge, and
+  in each stream's picture-in-picture window (via Document PiP; see notes).
 - **Quality controls** — three independent sliders, adjustable before or
   during a broadcast: **Resolution** (10%–100% multiplier of the native capture
   size, so odd/ultrawide/window captures scale proportionally; 100% = full
@@ -40,12 +47,15 @@ address — they can open the page served by the broadcaster
   reconnection. Lower settings are the main way to cut CPU/GPU usage on weak
   devices — both the broadcaster (capture + encode) and viewers (decode +
   render) benefit.
-- **Watch** — pick *Watch broadcasts* and add the address of each broadcaster
-  (e.g. `192.168.1.20:8080`). Every added address becomes its own live video
-  tile, so one page can watch several broadcasts (or several tiles of the
-  same one) simultaneously. Drag a tile's top bar to move it, drag its
-  lower-right corner to resize it. Tiles reconnect automatically if the
-  broadcaster restarts its stream.
+- **Watch** — pick *Watch broadcasts*. *Available broadcasts* is filled
+  automatically from the server's LAN discovery; click **Watch** to open a tile,
+  or add an address by hand (e.g. `192.168.1.20:8080`). Every added address
+  becomes its own live video tile, so one page can watch several broadcasts (or
+  several tiles of the same one) simultaneously. Each tile shows the
+  broadcaster's nickname above the video and has a **PiP** button for
+  picture-in-picture. Drag a tile's top bar to move it, drag its lower-right
+  corner to resize it. Tiles reconnect automatically if the broadcaster
+  restarts its stream.
 - **Requested quality (viewers)** — in *Watch broadcasts*, expand *Requested
   quality for this viewer* to ask for lower resolution / frame rate / bitrate.
   Use the **Apply to** dropdown to target **All streams** or one specific
@@ -67,9 +77,14 @@ Signaling rendezvous happens at the broadcaster's server: viewers POST their
 offers there and poll it for answers and ICE candidates. Each connection is
 identified by a session id (per broadcast) plus an attempt id (per viewer
 connection), so leftover candidates from earlier attempts are never applied
-to a new connection. Viewers also post live quality wishes
+to a new connection. The broadcast's nickname travels with the session
+(renaming re-announces the same session without disturbing viewers) and is
+also returned to viewers with the answer. Viewers also post live quality wishes
 (`/signal/viewer-pref`); the broadcaster polls them (`/signal/viewer-prefs`)
-and applies the per-connection minimum.
+and applies the per-connection minimum. Every server advertises its active
+broadcast over UDP and collects the announcements it hears from other servers;
+`GET /discover` returns the merged list used by the *Available broadcasts*
+pane.
 
 ## Notes / limits
 
@@ -78,6 +93,18 @@ and applies the per-connection minimum.
   as a stream. Add it twice to see multiple tiles.
 - One broadcast per server run (state is in memory); restarting the broadcast
   resets it and viewers reconnect automatically.
+- Nicknames and other UI state live in the browser's `localStorage`, so each
+  browser remembers its own broadcaster name; viewers see the nick announced by
+  the broadcaster and it updates live thanks to discovery.
+- Picture-in-picture with the nickname bar uses the Document PiP API (Chrome /
+  Edge 116+). Browsers with only classic video PiP still get a PiP window, but
+  the OS draws no DOM overlay there, so the nickname is not visible; the page
+  logs this when it happens.
+- LAN discovery sends UDP to the loopback and each interface's broadcast
+  address on port 41234 (best effort; some firewalls drop broadcast traffic).
+  It always works for broadcasts on the same server (listed as *this server*),
+  and on a LAN when UDP 41234 is allowed. Discovery is only a convenience — the
+  manual address flow works without it.
 - Browsers only allow screen capture on localhost/HTTPS pages, so the
   broadcasting machine must open the page via `http://localhost:8080`.
   Receiving (watching) works fine over plain HTTP.
