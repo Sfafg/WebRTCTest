@@ -117,18 +117,34 @@ pane.
   preset (25% resolution, 15 fps, ~500 kbps) instead of the defaults. The
   broadcaster pane shows a live **Encoding** line (output size, fps, bitrate,
   codec, hardware/software encoder and the encoder's own limitation reason),
-  which is the quickest way to see where the CPU goes. Once a viewer connection
-  is established its ICE polling stops altogether (a reconnect starts it
-  again), so idle viewers cost almost nothing. The page also slows signaling
-  polling after setup and skips UI/stat updates while the tab is in the
-  background. The viewer count only includes live connections; failed
-  attempts and viewers that vanish are dropped automatically (8 s grace for a
-  network hiccup, 30 s for an unfinished handshake).
+  which is the quickest way to see where the CPU goes. The **Encoding** line
+  counts only connected encoders and shows half-finished handshakes separately
+  as *N pending*, so stale reconnect attempts are easy to spot. Once a viewer
+  connection is established its ICE polling stops altogether (a reconnect
+  starts it again), so idle viewers cost almost nothing. Reconnects are paced:
+  immediate after a broadcaster stop/restart, but failing connections back off
+  instead of spinning up a new encoder every second. Closing/reloading the
+  broadcaster tab withdraws the broadcast immediately, and the server expires
+  any session whose page stopped polling after 30 s, so a crashed or killed page
+  cannot leave a phantom broadcast in the discovery list. Offers are throttled
+  per viewer tab/IP and the broadcaster caps unfinished attempts, so a stray old
+  viewer tab cannot make the pending-connection count grow without bound. The
+  page also slows signaling polling after setup and skips UI/stat updates while
+  the tab is in the background. The viewer count only includes live
+  connections; failed attempts and viewers that vanish are dropped
+  automatically (8 s grace for a network hiccup, 12 s for an unfinished
+  handshake). A viewer page that is left
+  open keeps reconnecting by design, and every reconnect is a new random attempt
+  id; the viewer log lines therefore include the viewer's nickname, IP, a stable
+  per-tab id and the page URL, so repeated attempts from one forgotten tab are
+  easy to recognise (source ports change on every request — that is normal).
 - GPU use: screen sharing normally negotiates **VP8**, which browsers encode
   and decode in software (pure CPU; VP8 has no hardware encoder). The page asks
   `navigator.mediaCapabilities` which video codecs have a hardware encoder and
   prefers those (usually H.264 / VP9 / AV1), keeping VP8 as the fallback. The
-  broadcaster log prints the negotiated codec. If CPU is still high, hardware
+  broadcaster pane shows **Codec: …** plus the **Encoding** line (with a
+  hardware/software marker), and each viewer tile shows the codec it is
+  actually receiving. If CPU is still high, hardware
   acceleration is probably unavailable or disabled (check `chrome://gpu`), and
   `chrome://webrtc-internals` shows the `powerEfficientEncoder/Decoder` flags.
   On Linux, WebRTC hardware encode is often unavailable regardless of settings.

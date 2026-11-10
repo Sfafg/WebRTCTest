@@ -356,6 +356,7 @@
         <video id="preview" autoplay playsinline muted controls></video>
         <div id="castStatus"></div>
         <div id="viewerCount"></div>
+        <div class="muted" id="codecLine"></div>
         <div class="muted" id="perf"></div>
         <div id="log"></div>
       </div>
@@ -394,6 +395,9 @@ const $ = (id) => document.getElementById(id);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const rand = () => Math.random().toString(36).slice(2, 10);
 const shortId = (s) => String(s).slice(0, 6);
+// Stable for the lifetime of this tab so reconnects can be told apart from
+// genuinely new viewers in the broadcaster's log.
+const TAB_ID = rand();
 
 // Nicknames persist in localStorage so they survive reloads and restarts.
 const NICK_KEY = 'screen-share.nick';
@@ -639,6 +643,8 @@ function addTile(rawAddress) {
     removed: false,
     releaseHold: null,
     token: { stopped: false },
+    statusText: '',
+    codec: '',
     want: wantDefaults ? Object.assign({}, wantDefaults) : null,
   };
   applyTileRect(tile);
@@ -663,7 +669,13 @@ function addTile(rawAddress) {
 }
 
 function setTileStatus(tile, msg) {
-  tile.status.textContent = msg;
+  tile.statusText = msg;
+  renderTileStatus(tile);
+}
+
+// Status plus the codec actually being received for this tile.
+function renderTileStatus(tile) {
+  tile.status.textContent = (tile.statusText || '') + (tile.codec ? ' \u00b7 ' + tile.codec : '');
 }
 
 // The broadcaster's nickname is shown in the tile header, in the floating
@@ -755,25 +767,34 @@ function removeTile(tile) {
 
 async function runTileLoop(tile) {
   while (!tile.removed) {
-    tile.token.stopped = true; // stop loops from the previous attempt
+    tile.token.stopped = true; // retire handlers/polls from the previous attempt
     const token = (tile.token = { stopped: false });
     const hold = new Promise((r) => { tile.releaseHold = r; }); // resolves when connection/stream ends
+    const startedAt = Date.now();
     try {
       await connectTile(tile, token);
       await hold;
       if (!tile.removed) setTileStatus(tile, 'Connection lost — reconnecting…');
     } catch (err) {
       if (tile.removed) break;
-      setTileStatus(tile, 'Error: ' + err.message + ' — retrying…');
-      tile.releaseHold();
-      await sleep(2000);
+      // Aborted on purpose because the broadcast stopped/restarted: no error.
+      if (!token.stopped) {
+        setTileStatus(tile, 'Error: ' + err.message + ' — retrying…');
+        tile.releaseHold();
+      }
     }
+    if (tile.removed) break;
+    // Pace retries. A stop/restart reconnect starts quickly, but a connection
+    // that keeps failing must not spin: every attempt costs the broadcaster an
+    // encoder, so rapid failures back off instead of hammering.
+    await sleep(Date.now() - startedAt < 4000 ? 1500 : 300);
   }
   tile.releaseHold = null;
 }
 
 async function connectTile(tile, token) {
   if (tile.pc) { try { tile.pc.close(); } catch (_) {} tile.pc = null; }
+  tile.codec = '';
   setTileStatus(tile, 'Waiting for broadcaster…');
 
   const info = await pollUntil(tile.base + '/signal/announce', (d) => (d.sid ? d : null), () => tile.removed || token.stopped);
@@ -790,18 +811,24 @@ async function connectTile(tile, token) {
   applyCodecPreference(pc, await getCodecPreferences());
 
   pc.ontrack = (e) => {
+    if (token.stopped || tile.token !== token) return;
     tile.video.srcObject = e.streams[0];
     setTileStatus(tile, 'Watching.');
     for (const t of e.streams[0].getTracks()) {
-      t.addEventListener('ended', () => tile.releaseHold && tile.releaseHold());
+      // Only the attempt that owns this track may end the current hold; a
+      // closing old PC fires "ended" late and used to abort the new attempt,
+      // causing a rapid reconnect/encoder storm.
+      t.addEventListener('ended', () => {
+        if (!token.stopped && tile.token === token && tile.releaseHold) tile.releaseHold();
+      });
     }
   };
   pc.onicecandidate = (e) => {
-    if (e.candidate) {
-      post(tile.base + '/signal/viewer-ice', Object.assign({ sid: sid, aid: aid }, e.candidate.toJSON())).catch(() => {});
-    }
+    if (!e.candidate || token.stopped || tile.token !== token) return;
+    post(tile.base + '/signal/viewer-ice', Object.assign({ sid: sid, aid: aid }, e.candidate.toJSON())).catch(() => {});
   };
   pc.onconnectionstatechange = () => {
+    if (token.stopped || tile.token !== token) return;
     const s = pc.connectionState;
     if (s === 'connected') setTileStatus(tile, 'Watching.');
     else if (s === 'disconnected') setTileStatus(tile, 'Connection unstable…');
@@ -812,11 +839,14 @@ async function connectTile(tile, token) {
   };
 
   await pc.setLocalDescription(await pc.createOffer());
-  await post(tile.base + '/signal/viewer-offer', { sid: sid, aid: aid, type: 'offer', sdp: pc.localDescription.sdp });
+  await post(tile.base + '/signal/viewer-offer', {
+    sid: sid, aid: aid, nick: storedNick(), tab: TAB_ID, page: location.href, type: 'offer', sdp: pc.localDescription.sdp,
+  });
   tile.sid = sid;
   tile.aid = aid;
   sendWants(tile); // tell the broadcaster what quality we want
   setTileStatus(tile, 'Waiting for broadcaster to accept…');
+  pollCasterSession(tile, sid, token); // abort/retry if it stops or restarts
 
   const answer = await pollUntil(
     tile.base + '/signal/answer?sid=' + encodeURIComponent(sid) + '&aid=' + encodeURIComponent(aid),
@@ -829,6 +859,52 @@ async function connectTile(tile, token) {
   setTileStatus(tile, 'Connecting…');
 
   pollCasterIce(tile, sid, aid, token); // background loop for this attempt
+  pollTileCodec(tile, token); // show the codec actually being received
+}
+
+// A closed remote peer connection does not always tell us quickly (ICE consent
+// can take ~30 s to time out), so watch the broadcaster's session directly.
+// When it stops or restarts, abort this attempt so runTileLoop reconnects
+// immediately instead of showing a dead tile forever.
+async function pollCasterSession(tile, sid, token) {
+  while (!tile.removed && !token.stopped) {
+    await sleep(2000);
+    if (tile.removed || token.stopped) break;
+    let d = null;
+    try { d = await getJSON(tile.base + '/signal/announce'); } catch (_) { continue; }
+    if (d.sid === sid) continue;
+    token.stopped = true;
+    if (d.sid) setTileStatus(tile, 'Broadcaster restarted — reconnecting…');
+    else setTileStatus(tile, 'Broadcaster stopped — waiting for them to start again…');
+    if (tile.releaseHold) tile.releaseHold();
+    return;
+  }
+}
+
+// Query inbound stats occasionally to display the negotiated codec on the tile.
+async function pollTileCodec(tile, token) {
+  let last = '';
+  while (!tile.removed && !token.stopped) {
+    await sleep(last ? 5000 : 1500);
+    if (tile.removed || token.stopped) break;
+    if (!tile.pc || tile.pc.connectionState !== 'connected') continue;
+    try {
+      const stats = await tile.pc.getStats();
+      let codecId = null;
+      const codecs = new Map();
+      stats.forEach((r) => {
+        if (r.type === 'codec') codecs.set(r.id, r);
+        if (r.type === 'inbound-rtp' && r.kind === 'video') codecId = r.codecId;
+      });
+      const rec = codecId ? codecs.get(codecId) : null;
+      const name = rec ? rec.mimeType.replace('video/', '') : '';
+      if (name && name !== last) {
+        last = name;
+        tile.codec = name;
+        renderTileStatus(tile);
+      }
+    } catch (_) { /* stats unavailable; try again later */ }
+  }
 }
 
 // Candidates are scoped to (sid, aid) on the server, so only candidates that
@@ -1189,13 +1265,28 @@ const perf = { pc: null, bytes: 0, ts: 0 };
 
 async function updatePerf() {
   const el = $('perf');
+  const codecEl = $('codecLine');
   if (!el) return;
-  if (!cast.running) { el.textContent = ''; return; }
-  if (!cast.pcs.size) {
-    el.textContent = 'Sharing the screen: capture + preview only, encoding starts when a viewer connects.';
+  if (!cast.running) {
+    el.textContent = '';
+    if (codecEl) codecEl.textContent = '';
     return;
   }
-  const pc = cast.pcs.values().next().value;
+  if (!cast.pcs.size) {
+    el.textContent = 'Sharing the screen: capture + preview only, encoding starts when a viewer connects.';
+    if (codecEl) codecEl.textContent = 'Codec: not negotiated yet (waiting for a viewer).';
+    return;
+  }
+  let connected = 0;
+  for (const p of cast.pcs.values()) {
+    if (p.connectionState === 'connected') connected++;
+  }
+  const pending = cast.pcs.size - connected;
+  let pc = null;
+  for (const p of cast.pcs.values()) {
+    if (p.connectionState === 'connected') { pc = p; break; }
+  }
+  if (!pc) pc = cast.pcs.values().next().value;
   let stats;
   try { stats = await pc.getStats(); } catch (_) { return; }
   let video = null;
@@ -1214,6 +1305,12 @@ async function updatePerf() {
   perf.bytes = video.bytesSent || 0;
   perf.ts = now;
   const codec = video.codecId ? codecs.get(video.codecId) : null;
+  if (codecEl) {
+    const hw = typeof video.powerEfficientEncoder === 'boolean'
+      ? (video.powerEfficientEncoder ? ' (hardware)' : ' (software)')
+      : '';
+    codecEl.textContent = 'Codec: ' + (codec ? codec.mimeType.replace('video/', '') : 'unknown') + hw;
+  }
   const bits = [];
   if (video.frameWidth && video.frameHeight) bits.push(video.frameWidth + '\u00d7' + video.frameHeight);
   if (video.framesPerSecond != null) bits.push(Math.round(video.framesPerSecond) + ' fps');
@@ -1226,7 +1323,12 @@ async function updatePerf() {
     bits.push(video.powerEfficientEncoder ? 'hardware encoder' : 'software encoder');
   }
   let text = 'Encoding: ' + (bits.join(' \u00b7 ') || 'starting…');
-  if (cast.pcs.size > 1) text += ' \u2044 ' + cast.pcs.size + ' encoders (one per viewer)';
+  if (cast.pcs.size > 1) {
+    // Pending = accepted attempts that have not finished the handshake yet.
+    // Only connected viewers actually get an encoder, so show the two apart.
+    text += ' \u2044 ' + connected + ' encoder' + (connected === 1 ? '' : 's');
+    if (pending) text += ' \u00b7 ' + pending + ' pending';
+  }
   el.textContent = text;
 }
 
@@ -1354,6 +1456,18 @@ async function pollViewerOffers(token) {
 async function acceptViewer(offer) {
   if (!cast.running || cast.pcs.has(offer.aid)) return;
 
+  // Bound the damage a stale/reconnecting viewer (or an old page still running
+  // buggy retry code) can do: half-open attempts must not pile up forever.
+  let connected = 0;
+  for (const p of cast.pcs.values()) if (p.connectionState === 'connected') connected++;
+  if (cast.pcs.size >= 25 || cast.pcs.size - connected >= 10) {
+    if (!cast.pendingWarn || Date.now() - cast.pendingWarn > 10000) {
+      cast.pendingWarn = Date.now();
+      log('Too many unfinished connection attempts — ignoring new ones. Close stray viewer tabs.');
+    }
+    return;
+  }
+
   const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
   cast.pcs.set(offer.aid, pc);
   for (const track of cast.stream.getTracks()) pc.addTrack(track, cast.stream);
@@ -1368,14 +1482,14 @@ async function acceptViewer(offer) {
   const timers = { handshake: 0, grace: 0 };
   // Viewers that vanish mid-handshake (closed tab, dropped network) must not
   // linger forever in the count.
-  timers.handshake = setTimeout(() => dropViewer(offer.aid, 'handshake timeout'), 30000);
+  timers.handshake = setTimeout(() => dropViewer(offer.aid, 'handshake timeout'), 12000);
 
   pc.onconnectionstatechange = () => {
     const s = pc.connectionState;
     if (s === 'connected') {
       clearTimeout(timers.handshake);
       clearTimeout(timers.grace);
-      log('Viewer ' + shortId(offer.aid) + ' connected.');
+      log('Viewer ' + shortId(offer.aid) + ' connected' + (offer.ip ? ' from ' + offer.ip : '') + '.');
       // Encoding parameters are only reliably accepted after negotiation.
       const settings = effectiveSettings(offer.aid);
       for (const sender of pc.getSenders()) {
@@ -1409,7 +1523,10 @@ async function acceptViewer(offer) {
   for (const sender of pc.getSenders()) {
     if (sender.track && sender.track.kind === 'video') applyQualityToSender(sender, settings).catch(() => {});
   }
-  log('Accepted viewer ' + shortId(offer.aid) + ' — waiting for it to connect.');
+  const who = offer.nick ? ' \u00b7 \u201c' + offer.nick + '\u201d' : '';
+  const tab = offer.tab ? ' \u00b7 tab ' + shortId(offer.tab) : '';
+  const page = offer.page ? ' \u00b7 ' + offer.page.replace(/^https?:\/\//, '').slice(0, 60) : '';
+  log('Viewer ' + shortId(offer.aid) + ' from ' + (offer.ip || '?') + who + tab + page + ' — waiting for it to connect.');
   updateViewerCount();
 }
 
@@ -1482,6 +1599,7 @@ function stopBroadcast() {
   perf.bytes = 0;
   perf.ts = 0;
   $('perf').textContent = '';
+  $('codecLine').textContent = '';
   post('/signal/announce', { sid: null }).catch(() => {});
   $('preview').srcObject = null;
   $('preview').style.display = 'none';
@@ -1533,6 +1651,17 @@ $('castNick').addEventListener('change', () => {
   post('/signal/announce', { sid: cast.sid, nick: cast.nick })
     .then(() => log('Nickname changed to \u201c' + (cast.nick || 'Anonymous') + '\u201d.'))
     .catch(() => {});
+});
+
+// Closing/reloading the tab must withdraw the broadcast immediately instead of
+// leaving a ghost in everyone's discovery list. (A crashed page is caught by
+// the server's session expiry: it stops seeing the broadcaster's polls.)
+window.addEventListener('pagehide', () => {
+  if (!cast.running) return;
+  try {
+    const body = new Blob([JSON.stringify({ sid: null })], { type: 'application/json' });
+    navigator.sendBeacon('/signal/announce', body);
+  } catch (_) {}
 });
 
 for (const id of ['resolution', 'fps', 'bitrate']) {
@@ -1615,7 +1744,14 @@ function renderDiscovered(list) {
     const btn = document.createElement('button');
     btn.textContent = 'Watch';
     btn.addEventListener('click', () => {
-      try { addTile(b.address); } catch (err) { alert(err.message); }
+      try {
+        // Clicking repeatedly must not pile up identical tiles (each tile keeps
+        // reconnecting and makes the broadcaster allocate another encoder).
+        const base = normalizeAddress(b.address);
+        const existing = tiles.find((t) => t.base === base);
+        if (existing) { bringToFront(existing); return; }
+        addTile(b.address);
+      } catch (err) { alert(err.message); }
     });
     row.append(meta, btn);
     box.append(row);

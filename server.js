@@ -39,6 +39,7 @@ const INSTANCE_ID = Math.random().toString(36).slice(2, 12);
 const signal = {
   sid: null,
   nick: '',
+  seen: 0,
   offers: [],
   answers: {},
   casterIce: {},
@@ -49,12 +50,31 @@ const signal = {
 function resetSession(sid, nick) {
   signal.sid = sid;
   signal.nick = nick || '';
+  signal.seen = sid ? Date.now() : 0;
   signal.offers = [];
   signal.answers = {};
   signal.casterIce = {};
   signal.viewerIce = [];
   signal.prefs = [];
+  offerThrottle.clear();
 }
+
+// A broadcaster that closes its tab (or crashes) cannot send a stop message.
+// Its live page polls broadcaster-only endpoints every few hundred ms, so an
+// idle session without those polls is a ghost: withdraw it instead of showing
+// a phantom broadcast in discovery forever.
+const SESSION_TTL_MS = 30000;
+// A forgotten viewer tab (possibly running older code) can otherwise create a
+// fresh attempt every second. Throttle per viewer tab (or IP for older pages).
+const OFFER_MIN_GAP_MS = 1500;
+const offerThrottle = new Map();
+setInterval(() => {
+  if (!signal.sid || !signal.seen) return;
+  if (Date.now() - signal.seen <= SESSION_TTL_MS) return;
+  console.log('Broadcast session expired (broadcaster page went away).');
+  resetSession(null, '');
+  sendDiscovery();
+}, 5000).unref();
 
 function cleanNick(value) {
   return String(value == null ? '' : value)
@@ -234,7 +254,7 @@ const server = http.createServer(async (req, res) => {
         sid = sid ? sid.trim() : null;
         const nick = cleanNick(body.nick);
         if (sid !== signal.sid) resetSession(sid, nick);
-        else signal.nick = nick;
+        else { signal.nick = nick; signal.seen = Date.now(); }
         sendDiscovery(); // advertise (or withdraw) immediately
         return json(res, 200, { ok: true, sid: signal.sid, nick: signal.nick });
       }
@@ -247,13 +267,35 @@ const server = http.createServer(async (req, res) => {
         const body = await readJSON(req);
         need(body, 'sid', 'aid', 'sdp');
         if (body.sid !== signal.sid) return json(res, 409, { error: 'broadcast session changed - reconnect' });
-        signal.offers.push({ sid: body.sid, aid: body.aid, type: 'offer', sdp: body.sdp });
+        const ip = String(req.socket.remoteAddress || '').replace(/^::ffff:/, '');
+        const tab = String(body.tab || '').slice(0, 24);
+        const throttleKey = tab || ip;
+        const now = Date.now();
+        if (now - (offerThrottle.get(throttleKey) || 0) < OFFER_MIN_GAP_MS) {
+          return json(res, 429, { error: 'too many connection attempts - slow down' });
+        }
+        offerThrottle.set(throttleKey, now);
+        if (offerThrottle.size > 512) {
+          for (const [k, t] of offerThrottle) if (now - t > 60000) offerThrottle.delete(k);
+        }
+        signal.offers.push({
+          sid: body.sid,
+          aid: body.aid,
+          nick: cleanNick(body.nick),
+          ip: ip,
+          tab: tab,
+          page: String(body.page || '').slice(0, 120),
+          ua: String(req.headers['user-agent'] || '').slice(0, 160),
+          type: 'offer',
+          sdp: body.sdp,
+        });
         return json(res, 200, { ok: true });
       }
       // Broadcaster: poll for new viewer offers.
       if (req.method === 'GET' && url.pathname === '/signal/viewer-offers') {
         const since = Number(q.get('since') || 0) || 0;
         if (q.get('sid') !== signal.sid) return json(res, 200, { offers: [], next: 0 });
+        signal.seen = Date.now(); // broadcaster is alive
         return json(res, 200, { offers: signal.offers.slice(since), next: signal.offers.length });
       }
 
@@ -276,6 +318,7 @@ const server = http.createServer(async (req, res) => {
       if (req.method === 'GET' && url.pathname === '/signal/viewer-prefs') {
         const since = Number(q.get('since') || 0) || 0;
         if (q.get('sid') !== signal.sid) return json(res, 200, { prefs: [], next: 0 });
+        signal.seen = Date.now(); // broadcaster is alive
         return json(res, 200, { prefs: signal.prefs.slice(since), next: signal.prefs.length });
       }
 
@@ -284,6 +327,7 @@ const server = http.createServer(async (req, res) => {
         const body = await readJSON(req);
         need(body, 'sid', 'aid', 'sdp');
         if (body.sid !== signal.sid) return json(res, 409, { error: 'broadcast session changed - reconnect' });
+        signal.seen = Date.now(); // broadcaster is alive
         signal.answers[body.sid + '/' + body.aid] = { type: 'answer', sdp: body.sdp };
         return json(res, 200, { ok: true });
       }
@@ -298,6 +342,7 @@ const server = http.createServer(async (req, res) => {
         const body = await readJSON(req);
         need(body, 'sid', 'aid', 'candidate');
         if (body.sid !== signal.sid) return json(res, 409, { error: 'broadcast session changed - reconnect' });
+        signal.seen = Date.now(); // broadcaster is alive
         const key = body.sid + '/' + body.aid;
         (signal.casterIce[key] || (signal.casterIce[key] = [])).push(body);
         return json(res, 200, { ok: true });
