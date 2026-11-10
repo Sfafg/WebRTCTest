@@ -232,6 +232,24 @@
           <input type="text" id="watchAddr" placeholder="e.g. 192.168.1.20:8080" autocomplete="off" spellcheck="false">
           <button id="addBtn">Add stream</button>
         </div>
+        <details class="quality" style="margin-top:14px">
+          <summary class="muted" style="cursor:pointer">
+            Requested quality for this viewer — <b id="wantSummary">100% · 120 fps · 20 Mbps</b>
+          </summary>
+          <div class="qhead" style="margin-top:10px">
+            <span class="muted">Resolution up to: <b id="wantResolutionLabel">100%</b></span>
+          </div>
+          <input type="range" id="wantResolution" min="10" max="100" step="5" value="100">
+          <div class="qhead" style="margin-top:12px">
+            <span class="muted">Frame rate up to: <b id="wantFpsLabel">120 fps</b></span>
+          </div>
+          <input type="range" id="wantFps" min="0" max="4" step="1" value="4">
+          <div class="qhead" style="margin-top:12px">
+            <span class="muted">Bitrate up to: <b id="wantBitrateLabel">20 Mbps</b></span>
+          </div>
+          <input type="range" id="wantBitrate" min="0" max="1000" step="10" value="1000">
+          <div class="muted" id="wantHint" style="margin-top:8px"></div>
+        </details>
       </div>
 
       <div id="castPane" hidden>
@@ -571,6 +589,7 @@ async function connectTile(tile, token) {
   tile.video.srcObject = null;
   pc.addTransceiver('video', { direction: 'recvonly' });
   pc.addTransceiver('audio', { direction: 'recvonly' });
+  applyCodecPreference(pc, await getCodecPreferences());
 
   pc.ontrack = (e) => {
     tile.video.srcObject = e.streams[0];
@@ -596,6 +615,9 @@ async function connectTile(tile, token) {
 
   await pc.setLocalDescription(await pc.createOffer());
   await post(tile.base + '/signal/viewer-offer', { sid: sid, aid: aid, type: 'offer', sdp: pc.localDescription.sdp });
+  tile.sid = sid;
+  tile.aid = aid;
+  sendWants(tile); // tell the broadcaster what quality we want
   setTileStatus(tile, 'Waiting for broadcaster to accept…');
 
   const answer = await pollUntil(
@@ -637,8 +659,8 @@ async function pollCasterIce(tile, sid, aid, token) {
 // ======================= Stream quality =======================
 
 // The bitrate slider is logarithmic so low values stay easy to fine-tune.
-function bitrateFromSlider() {
-  const t = Math.min(1000, Math.max(0, Number($('bitrate').value) || 0)) / 1000;
+function bitrateFromSlider(raw) {
+  const t = Math.min(1000, Math.max(0, Number(raw) || 0)) / 1000;
   const bps = MIN_BITRATE * Math.pow(MAX_BITRATE / MIN_BITRATE, t);
   return Math.round(bps / 10000) * 10000;
 }
@@ -669,7 +691,7 @@ function currentSettings() {
   const pct = Math.min(RES_MAX_PCT, Math.max(RES_MIN_PCT, Number($('resolution').value) || 50));
   const mult = pct / 100;
   const fps = FPS_STOPS[Number($('fps').value)] || 30;
-  return { mult, fps, bitrate: bitrateFromSlider() };
+  return { mult, fps, bitrate: bitrateFromSlider($('bitrate').value) };
 }
 
 function updateQualityLabel() {
@@ -691,6 +713,51 @@ function updateQualityLabel() {
   $('qualityHint').textContent =
     (size ? size + ' \u00b7 ' : '') + s.fps + ' fps \u00b7 ' + formatBitrate(s.bitrate) +
     ' \u00b7 \u2248 ' + mbPerMin + ' MB/min per viewer';
+}
+
+// ---- Per-viewer quality wishes ----
+// Every viewer may request lower settings for its own connection. The
+// broadcaster sends min(wish, its own settings), so a viewer can only ask for
+// less, never more, than the broadcaster is configured to offer.
+
+function wantSettings() {
+  const pct = Math.min(RES_MAX_PCT, Math.max(RES_MIN_PCT, Number($('wantResolution').value) || 100));
+  const fps = FPS_STOPS[Number($('wantFps').value)] || 30;
+  return { mult: pct / 100, fps, bitrate: bitrateFromSlider($('wantBitrate').value) };
+}
+
+function updateWantLabel() {
+  const w = wantSettings();
+  const pct = Math.round(w.mult * 100);
+  $('wantResolutionLabel').textContent = pct + '%';
+  $('wantFpsLabel').textContent = w.fps + ' fps';
+  $('wantBitrateLabel').textContent = formatBitrate(w.bitrate);
+  $('wantSummary').textContent = pct + '% \u00b7 ' + w.fps + ' fps \u00b7 ' + formatBitrate(w.bitrate);
+  $('wantHint').textContent =
+    'Ask for up to ' + pct + '% resolution \u00b7 ' + w.fps + ' fps \u00b7 ' + formatBitrate(w.bitrate) +
+    '. The broadcaster\u2019s own settings cap these; lower them to reduce your CPU/GPU.';
+}
+
+let wantTimer = 0;
+
+function sendWants(tile) {
+  if (!tile || !tile.base || !tile.sid || !tile.aid || tile.removed) return;
+  const w = wantSettings();
+  post(tile.base + '/signal/viewer-pref', {
+    sid: tile.sid,
+    aid: tile.aid,
+    res: w.mult,
+    fps: w.fps,
+    bitrate: w.bitrate,
+  }).catch(() => {});
+}
+
+// Debounced so dragging a slider sends one update, not dozens.
+function syncWants() {
+  clearTimeout(wantTimer);
+  wantTimer = setTimeout(() => {
+    for (const tile of tiles) sendWants(tile);
+  }, 150);
 }
 
 // Limit the capture frame rate (supported everywhere); resolution is handled
@@ -729,18 +796,95 @@ async function applyQuality() {
   const settings = currentSettings();
   if (!cast.running) return;
   await applyCaptureConstraints(settings);
-  for (const pc of cast.pcs.values()) {
-    for (const sender of pc.getSenders()) {
-      if (sender.track && sender.track.kind === 'video') {
-        applyQualityToSender(sender, settings).catch(() => {});
-      }
+  for (const [aid, pc] of cast.pcs) applyViewerQuality(aid, pc);
+}
+
+// ======================= Codec selection =======================
+
+// Screen sharing defaults to VP8, which browsers only ever encode and decode
+// in software. Ask the browser which codecs it can handle with a hardware
+// encoder (MediaCapabilities) and prefer those, keeping VP8 as the fallback.
+// The ordering keeps RTX entries attached to their codec, as required by
+// setCodecPreferences.
+let codecPrefsPromise = null;
+
+async function buildCodecPreferenceList() {
+  if (!window.RTCPeerConnection || typeof RTCRtpSender.getCapabilities !== 'function') return null;
+  const caps = RTCRtpSender.getCapabilities('video');
+  if (!caps || !caps.codecs || !caps.codecs.length) return null;
+
+  const groups = [];
+  for (const codec of caps.codecs) {
+    if (/rtx/i.test(codec.mimeType)) {
+      if (groups.length) groups[groups.length - 1].push(codec);
+      continue;
     }
+    groups.push([codec]);
   }
+
+  const mc = navigator.mediaCapabilities;
+  const scores = groups.map(() => 0);
+  if (mc && typeof mc.encodingInfo === 'function') {
+    await Promise.all(groups.map(async (group, i) => {
+      let score = /vp8/i.test(group[0].mimeType) ? 1 : 0;
+      try {
+        const info = await mc.encodingInfo({
+          type: 'webrtc',
+          video: {
+            contentType: group[0].mimeType,
+            width: 1280,
+            height: 720,
+            bitrate: 2000000,
+            framerate: 30,
+          },
+        });
+        if (info && info.powerEfficient) score += 10;
+      } catch (_) { /* codec or parameters not understood: keep neutral */ }
+      scores[i] = score;
+    }));
+  }
+
+  const order = groups.map((_, i) => i).sort((a, b) => scores[b] - scores[a] || a - b);
+  return order.reduce((all, i) => all.concat(groups[i]), []);
+}
+
+function getCodecPreferences() {
+  if (!codecPrefsPromise) codecPrefsPromise = buildCodecPreferenceList().catch(() => null);
+  return codecPrefsPromise;
+}
+
+function applyCodecPreference(pc, ordered) {
+  if (!ordered || !ordered.length) return;
+  for (const tr of pc.getTransceivers()) {
+    if (typeof tr.setCodecPreferences !== 'function') return;
+    const senderKind = tr.sender && tr.sender.track ? tr.sender.track.kind : '';
+    const receiverKind = tr.receiver && tr.receiver.track ? tr.receiver.track.kind : '';
+    const kind = senderKind || receiverKind;
+    if (kind && kind !== 'video') continue;
+    try { tr.setCodecPreferences(ordered); } catch (_) {}
+  }
+}
+
+async function logNegotiatedCodec(pc) {
+  try {
+    const stats = await pc.getStats();
+    let codecId = null;
+    stats.forEach((r) => {
+      if (!codecId && r.type === 'outbound-rtp' && r.kind === 'video') codecId = r.codecId;
+    });
+    if (!codecId) return;
+    stats.forEach((r) => {
+      if (r.id === codecId) {
+        log('Video codec: ' + r.mimeType +
+          ' \u2014 see chrome://webrtc-internals for powerEfficientEncoder.');
+      }
+    });
+  } catch (_) {}
 }
 
 // ======================= Broadcaster =======================
 
-const cast = { running: false, sid: null, stream: null, pcs: new Map(), tokens: [], uiTimer: null };
+const cast = { running: false, sid: null, stream: null, pcs: new Map(), prefs: new Map(), tokens: [], uiTimer: null, codecLogged: false };
 
 function updateViewerCount() {
   let connected = 0;
@@ -756,9 +900,32 @@ function dropViewer(aid, reason) {
   const pc = cast.pcs.get(aid);
   if (!pc) return;
   cast.pcs.delete(aid);
+  cast.prefs.delete(aid);
   try { pc.close(); } catch (_) {}
   log('Viewer ' + shortId(aid) + ' left (' + reason + ').');
   updateViewerCount();
+}
+
+// What this viewer actually gets: its wish, capped by the broadcaster's own
+// settings per dimension (never more than the broadcaster sends to anyone).
+function effectiveSettings(aid) {
+  const base = currentSettings();
+  const want = cast.prefs.get(aid);
+  if (!want) return base;
+  return {
+    mult: Math.min(base.mult, want.mult),
+    fps: Math.min(base.fps, want.fps),
+    bitrate: Math.min(base.bitrate, want.bitrate),
+  };
+}
+
+function applyViewerQuality(aid, pc) {
+  const settings = effectiveSettings(aid);
+  for (const sender of pc.getSenders()) {
+    if (sender.track && sender.track.kind === 'video') {
+      applyQualityToSender(sender, settings).catch(() => {});
+    }
+  }
 }
 
 async function startBroadcast() {
@@ -776,7 +943,9 @@ async function startBroadcast() {
   cast.running = true;
   cast.sid = rand();
   cast.pcs = new Map();
+  cast.prefs = new Map();
   cast.tokens = [];
+  cast.codecLogged = false;
 
   stream.getVideoTracks()[0].addEventListener('ended', () => {
     log('Screen sharing ended.');
@@ -799,12 +968,17 @@ async function startBroadcast() {
     : 'Broadcasting — tell viewers to add this server\u2019s address on their page.';
 
   applyQuality().catch(() => {});
+  // Keep the absolute resolution current if the shared window is resized.
+  clearInterval(cast.uiTimer);
+  cast.uiTimer = setInterval(updateQualityLabel, 2000);
 
   const offersToken = { stopped: false };
   const iceToken = { stopped: false };
-  cast.tokens.push(offersToken, iceToken);
+  const prefsToken = { stopped: false };
+  cast.tokens.push(offersToken, iceToken, prefsToken);
   pollViewerOffers(offersToken);
   pollViewerIce(iceToken);
+  pollViewerPrefs(prefsToken);
 }
 
 // Every viewer offer (each with a unique aid) gets its own peer connection,
@@ -832,6 +1006,7 @@ async function acceptViewer(offer) {
   const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
   cast.pcs.set(offer.aid, pc);
   for (const track of cast.stream.getTracks()) pc.addTrack(track, cast.stream);
+  applyCodecPreference(pc, await getCodecPreferences());
 
   pc.onicecandidate = (e) => {
     if (e.candidate) {
@@ -851,11 +1026,15 @@ async function acceptViewer(offer) {
       clearTimeout(timers.grace);
       log('Viewer ' + shortId(offer.aid) + ' connected.');
       // Encoding parameters are only reliably accepted after negotiation.
-      const settings = currentSettings();
+      const settings = effectiveSettings(offer.aid);
       for (const sender of pc.getSenders()) {
         if (sender.track && sender.track.kind === 'video') {
           applyQualityToSender(sender, settings).catch(() => {});
         }
+      }
+      if (!cast.codecLogged) {
+        cast.codecLogged = true;
+        logNegotiatedCodec(pc);
       }
       updateViewerCount();
     } else if (s === 'disconnected') {
@@ -875,7 +1054,7 @@ async function acceptViewer(offer) {
   await pc.setRemoteDescription({ type: 'offer', sdp: offer.sdp });
   await pc.setLocalDescription(await pc.createAnswer());
   await post('/signal/answer', { sid: cast.sid, aid: offer.aid, type: 'answer', sdp: pc.localDescription.sdp });
-  const settings = currentSettings();
+  const settings = effectiveSettings(offer.aid);
   for (const sender of pc.getSenders()) {
     if (sender.track && sender.track.kind === 'video') applyQualityToSender(sender, settings).catch(() => {});
   }
@@ -911,6 +1090,26 @@ async function pollViewerIce(token) {
       if (p.connectionState !== 'connected') { allConnected = false; break; }
     }
     await sleep(allConnected ? 2000 : POLL_MS);
+  }
+}
+
+// Apply each viewer's requested quality: effective = min(wish, broadcaster).
+async function pollViewerPrefs(token) {
+  let since = 0;
+  while (cast.running && !token.stopped) {
+    try {
+      const d = await getJSON('/signal/viewer-prefs?sid=' + encodeURIComponent(cast.sid) + '&since=' + since);
+      since = d.next;
+      for (const p of d.prefs) {
+        const mult = Math.min(1, Math.max(RES_MIN_PCT / 100, Number(p.res) || 1));
+        const fps = Math.min(120, Math.max(5, Number(p.fps) || 30));
+        const bitrate = Math.min(MAX_BITRATE, Math.max(MIN_BITRATE, Number(p.bitrate) || MIN_BITRATE));
+        cast.prefs.set(p.aid, { mult, fps, bitrate });
+        const pc = cast.pcs.get(p.aid);
+        if (pc) applyViewerQuality(p.aid, pc);
+      }
+    } catch (_) {}
+    await sleep(POLL_MS);
   }
 }
 
@@ -965,15 +1164,20 @@ $('stopBtn').addEventListener('click', stopBroadcast);
 
 for (const id of ['resolution', 'fps', 'bitrate']) {
   $(id).addEventListener('input', () => {
-updateQualityLabel();
-window.addEventListener('resize', updateQualityLabel);
-  applyQuality().catch(() => {});
-  // Keep the absolute resolution current if the shared window is resized.
-  clearInterval(cast.uiTimer);
-  cast.uiTimer = setInterval(updateQualityLabel, 2000);
+    updateQualityLabel();
+    applyQuality().catch(() => {});
   });
 }
 updateQualityLabel();
+window.addEventListener('resize', updateQualityLabel);
+
+for (const id of ['wantResolution', 'wantFps', 'wantBitrate']) {
+  $(id).addEventListener('input', () => {
+    updateWantLabel();
+    syncWants();
+  });
+}
+updateWantLabel();
 
 function updatePanes() {
   const mode = document.querySelector('input[name="mode"]:checked').value;

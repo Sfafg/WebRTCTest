@@ -26,12 +26,14 @@ const PUBLIC_DIR = path.join(__dirname, 'public');
 //   answers    per viewer:         `${sid}/${aid}` -> { type, sdp }
 //   casterIce  broadcaster->viewer `${sid}/${aid}` -> [candidateInit...]
 //   viewerIce  viewer->broadcaster [{ aid, candidate }]
+//   prefs      viewer quality wishes [{ sid, aid, res, fps, bitrate }]
 const signal = {
   sid: null,
   offers: [],
   answers: {},
   casterIce: {},
   viewerIce: [],
+  prefs: [],
 };
 
 function resetSession(sid) {
@@ -40,6 +42,7 @@ function resetSession(sid) {
   signal.answers = {};
   signal.casterIce = {};
   signal.viewerIce = [];
+  signal.prefs = [];
 }
 
 const MIME = {
@@ -146,6 +149,28 @@ const server = http.createServer(async (req, res) => {
         const since = Number(q.get('since') || 0) || 0;
         if (q.get('sid') !== signal.sid) return json(res, 200, { offers: [], next: 0 });
         return json(res, 200, { offers: signal.offers.slice(since), next: signal.offers.length });
+      }
+
+      // Viewer -> broadcaster: what quality this viewer wants for its own
+      // connection (res = resolution multiplier, fps, bitrate).
+      if (req.method === 'POST' && url.pathname === '/signal/viewer-pref') {
+        const body = await readJSON(req);
+        need(body, 'sid', 'aid', 'res', 'fps', 'bitrate');
+        if (body.sid !== signal.sid) return json(res, 409, { error: 'broadcast session changed - reconnect' });
+        signal.prefs.push({
+          sid: body.sid,
+          aid: body.aid,
+          res: Number(body.res),
+          fps: Number(body.fps),
+          bitrate: Number(body.bitrate),
+        });
+        return json(res, 200, { ok: true });
+      }
+      // Broadcaster: poll all viewers' quality wishes.
+      if (req.method === 'GET' && url.pathname === '/signal/viewer-prefs') {
+        const since = Number(q.get('since') || 0) || 0;
+        if (q.get('sid') !== signal.sid) return json(res, 200, { prefs: [], next: 0 });
+        return json(res, 200, { prefs: signal.prefs.slice(since), next: signal.prefs.length });
       }
 
       // Broadcaster: post the answer for one viewer attempt.

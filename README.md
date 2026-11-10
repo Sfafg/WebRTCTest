@@ -46,6 +46,13 @@ address — they can open the page served by the broadcaster
   same one) simultaneously. Drag a tile's top bar to move it, drag its
   lower-right corner to resize it. Tiles reconnect automatically if the
   broadcaster restarts its stream.
+- **Requested quality (viewers)** — in *Watch broadcasts*, expand *Requested
+  quality for this viewer* to ask for lower resolution / frame rate / bitrate.
+  The wish is sent to every broadcaster you are watching, and each connection
+  gets the **minimum** of your wish and the broadcaster's own settings — you
+  can only ask for less, never more. Lowering it cuts decoding/rendering CPU on
+  your machine without affecting other viewers. Default is "max", i.e. exactly
+  what the broadcaster offers.
 - **Only streams** — the button above the stage hides all controls and expands
   the stage to the whole window, leaving just the stream tiles (handy for a
   clean presentation). Hover a tile to reveal its bar for moving/removing it;
@@ -55,7 +62,9 @@ Signaling rendezvous happens at the broadcaster's server: viewers POST their
 offers there and poll it for answers and ICE candidates. Each connection is
 identified by a session id (per broadcast) plus an attempt id (per viewer
 connection), so leftover candidates from earlier attempts are never applied
-to a new connection.
+to a new connection. Viewers also post live quality wishes
+(`/signal/viewer-pref`); the broadcaster polls them (`/signal/viewer-prefs`)
+and applies the per-connection minimum.
 
 ## Notes / limits
 
@@ -76,3 +85,11 @@ to a new connection.
   save background CPU. The viewer count only includes live connections; failed
   attempts and viewers that vanish are dropped automatically (8 s grace for a
   network hiccup, 30 s for an unfinished handshake).
+- GPU use: screen sharing normally negotiates **VP8**, which browsers encode
+  and decode in software (pure CPU; VP8 has no hardware encoder). The page asks
+  `navigator.mediaCapabilities` which video codecs have a hardware encoder and
+  prefers those (usually H.264 / VP9 / AV1), keeping VP8 as the fallback. The
+  broadcaster log prints the negotiated codec. If CPU is still high, hardware
+  acceleration is probably unavailable or disabled (check `chrome://gpu`), and
+  `chrome://webrtc-internals` shows the `powerEfficientEncoder/Decoder` flags.
+  On Linux, WebRTC hardware encode is often unavailable regardless of settings.
