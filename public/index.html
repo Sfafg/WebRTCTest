@@ -234,9 +234,15 @@
         </div>
         <details class="quality" style="margin-top:14px">
           <summary class="muted" style="cursor:pointer">
-            Requested quality for this viewer — <b id="wantSummary">100% · 120 fps · 20 Mbps</b>
+            Requested quality for this viewer — <b id="wantSummary">100% · 120 fps · 20 Mbps — All streams</b>
           </summary>
-          <div class="qhead" style="margin-top:10px">
+          <div class="row" style="margin-top:10px; align-items:center">
+            <span class="muted">Apply to:</span>
+            <select id="wantTarget">
+              <option value="">All streams</option>
+            </select>
+          </div>
+          <div class="qhead" style="margin-top:12px">
             <span class="muted">Resolution up to: <b id="wantResolutionLabel">100%</b></span>
           </div>
           <input type="range" id="wantResolution" min="10" max="100" step="5" value="100">
@@ -510,8 +516,11 @@ function addTile(rawAddress) {
 
   const rect = stage.getBoundingClientRect();
   const n = tileSeq++;
+  const label = addr.textContent + ' (#' + (n + 1) + ')';
   const tile = {
     base,
+    n,
+    label,
     el,
     video,
     status,
@@ -523,11 +532,13 @@ function addTile(rawAddress) {
     removed: false,
     releaseHold: null,
     token: { stopped: false },
+    want: wantDefaults ? Object.assign({}, wantDefaults) : null,
   };
   applyTileRect(tile);
   constrainTile(tile);
   tiles.push(tile);
   bringToFront(tile);
+  refreshWantTargets();
 
   rm.addEventListener('click', () => removeTile(tile));
   header.addEventListener('pointerdown', (e) => {
@@ -555,6 +566,7 @@ function removeTile(tile) {
   tile.el.remove();
   const i = tiles.indexOf(tile);
   if (i >= 0) tiles.splice(i, 1);
+  refreshWantTargets();
 }
 
 async function runTileLoop(tile) {
@@ -718,12 +730,28 @@ function updateQualityLabel() {
 // ---- Per-viewer quality wishes ----
 // Every viewer may request lower settings for its own connection. The
 // broadcaster sends min(wish, its own settings), so a viewer can only ask for
-// less, never more, than the broadcaster is configured to offer.
+// less, never more, than the broadcaster is configured to offer. The wish can
+// target one particular stream (select "Apply to") or all streams at once.
+
+let wantDefaults = null;   // wish used for new streams and "All streams"
+let wantTimer = 0;
 
 function wantSettings() {
   const pct = Math.min(RES_MAX_PCT, Math.max(RES_MIN_PCT, Number($('wantResolution').value) || 100));
   const fps = FPS_STOPS[Number($('wantFps').value)] || 30;
   return { mult: pct / 100, fps, bitrate: bitrateFromSlider($('wantBitrate').value) };
+}
+
+function wantTargetValue() {
+  const sel = $('wantTarget');
+  return sel ? sel.value : '';
+}
+
+function selectedWantLabel() {
+  const sel = $('wantTarget');
+  if (!sel || !sel.value) return 'All streams';
+  const opt = sel.options[sel.selectedIndex];
+  return opt ? opt.textContent : 'All streams';
 }
 
 function updateWantLabel() {
@@ -732,17 +760,66 @@ function updateWantLabel() {
   $('wantResolutionLabel').textContent = pct + '%';
   $('wantFpsLabel').textContent = w.fps + ' fps';
   $('wantBitrateLabel').textContent = formatBitrate(w.bitrate);
-  $('wantSummary').textContent = pct + '% \u00b7 ' + w.fps + ' fps \u00b7 ' + formatBitrate(w.bitrate);
+  $('wantSummary').textContent =
+    pct + '% \u00b7 ' + w.fps + ' fps \u00b7 ' + formatBitrate(w.bitrate) +
+    ' \u2014 ' + selectedWantLabel();
   $('wantHint').textContent =
     'Ask for up to ' + pct + '% resolution \u00b7 ' + w.fps + ' fps \u00b7 ' + formatBitrate(w.bitrate) +
+    ' for ' + selectedWantLabel() +
     '. The broadcaster\u2019s own settings cap these; lower them to reduce your CPU/GPU.';
 }
 
-let wantTimer = 0;
+function bitrateToSlider(bps) {
+  const clamped = Math.min(MAX_BITRATE, Math.max(MIN_BITRATE, bps));
+  const t = Math.log(clamped / MIN_BITRATE) / Math.log(MAX_BITRATE / MIN_BITRATE);
+  return Math.round((t * 1000) / 10) * 10;
+}
+
+function setWantSliders(w) {
+  $('wantResolution').value = Math.round(w.mult * 100);
+  let idx = FPS_STOPS.findIndex((f) => f >= w.fps);
+  if (idx < 0) idx = FPS_STOPS.length - 1;
+  $('wantFps').value = idx;
+  $('wantBitrate').value = bitrateToSlider(w.bitrate);
+  updateWantLabel();
+}
+
+function wantTileByTarget() {
+  const target = wantTargetValue();
+  if (!target) return null;
+  for (const tile of tiles) if (String(tile.n) === target) return tile;
+  return null;
+}
+
+// Show the wish of whatever is selected in the "Apply to" dropdown.
+function loadWantForTarget() {
+  const tile = wantTileByTarget();
+  setWantSliders(tile ? (tile.want || wantDefaults) : wantDefaults);
+}
+
+// Rebuild the "Apply to" dropdown from the current stream tiles.
+function refreshWantTargets() {
+  const sel = $('wantTarget');
+  if (!sel) return;
+  const current = sel.value;
+  sel.textContent = '';
+  const all = document.createElement('option');
+  all.value = '';
+  all.textContent = 'All streams';
+  sel.append(all);
+  for (const tile of tiles) {
+    const opt = document.createElement('option');
+    opt.value = String(tile.n);
+    opt.textContent = tile.label;
+    sel.append(opt);
+  }
+  sel.value = Array.prototype.some.call(sel.options, (o) => o.value === current) ? current : '';
+  loadWantForTarget();
+}
 
 function sendWants(tile) {
   if (!tile || !tile.base || !tile.sid || !tile.aid || tile.removed) return;
-  const w = wantSettings();
+  const w = tile.want || wantDefaults || wantSettings();
   post(tile.base + '/signal/viewer-pref', {
     sid: tile.sid,
     aid: tile.aid,
@@ -752,11 +829,28 @@ function sendWants(tile) {
   }).catch(() => {});
 }
 
+// Apply the sliders to the selected stream, or to all streams at once.
+function applyWants() {
+  const w = wantSettings();
+  const target = wantTileByTarget();
+  if (target) {
+    target.want = Object.assign({}, w);
+    sendWants(target);
+    return;
+  }
+  wantDefaults = Object.assign({}, w);
+  for (const tile of tiles) {
+    tile.want = Object.assign({}, w);
+    sendWants(tile);
+  }
+}
+
 // Debounced so dragging a slider sends one update, not dozens.
 function syncWants() {
   clearTimeout(wantTimer);
   wantTimer = setTimeout(() => {
-    for (const tile of tiles) sendWants(tile);
+    applyWants();
+    updateWantLabel();
   }, 150);
 }
 
@@ -1177,6 +1271,9 @@ for (const id of ['wantResolution', 'wantFps', 'wantBitrate']) {
     syncWants();
   });
 }
+$('wantTarget').addEventListener('change', loadWantForTarget);
+wantDefaults = wantSettings();
+refreshWantTargets();
 updateWantLabel();
 
 function updatePanes() {

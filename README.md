@@ -48,11 +48,13 @@ address — they can open the page served by the broadcaster
   broadcaster restarts its stream.
 - **Requested quality (viewers)** — in *Watch broadcasts*, expand *Requested
   quality for this viewer* to ask for lower resolution / frame rate / bitrate.
-  The wish is sent to every broadcaster you are watching, and each connection
-  gets the **minimum** of your wish and the broadcaster's own settings — you
-  can only ask for less, never more. Lowering it cuts decoding/rendering CPU on
-  your machine without affecting other viewers. Default is "max", i.e. exactly
-  what the broadcaster offers.
+  Use the **Apply to** dropdown to target **All streams** or one specific
+  stream; each stream keeps its own wish, and picking it loads its values into
+  the sliders. The wish is sent to the broadcaster(s) of the targeted stream(s)
+  and each connection gets the **minimum** of your wish and the broadcaster's
+  own settings — you can only ask for less, never more. Lowering it cuts
+  decoding/rendering CPU on your machine without affecting other viewers.
+  Default is "max", i.e. exactly what the broadcaster offers.
 - **Only streams** — the button above the stage hides all controls and expands
   the stage to the whole window, leaving just the stream tiles (handy for a
   clean presentation). Hover a tile to reveal its bar for moving/removing it;
