@@ -38,7 +38,7 @@ to disable advertising/listening, or `DISCOVERY_PORT=...` to use another port.
   during a broadcast: **Resolution** (10%–100% multiplier of the native capture
   size, so odd/ultrawide/window captures scale proportionally; 100% = full
   resolution), **Frame rate** (15 / 24 / 30 / 60 / 120 fps) and **Bitrate**
-  (200 kbps – 20 Mbps, logarithmic scale). 60/120 fps needs a display that
+  (200 kbps – 100 Mbps, logarithmic scale). 60/120 fps needs a display that
   fast and a strong encoder. The resolution label shows both the multiplier and
   the absolute output size (estimated from the screen with `≈` before sharing,
   exact from the capture afterwards and kept up to date if the shared window is

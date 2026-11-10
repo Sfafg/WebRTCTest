@@ -291,7 +291,7 @@
         </div>
         <details class="quality" style="margin-top:14px">
           <summary class="muted" style="cursor:pointer">
-            Requested quality for this viewer — <b id="wantSummary">100% · 120 fps · 20 Mbps — All streams</b>
+            Requested quality for this viewer — <b id="wantSummary">100% · 120 fps · 100 Mbps — All streams</b>
           </summary>
           <div class="row" style="margin-top:10px; align-items:center">
             <span class="muted">Apply to:</span>
@@ -308,7 +308,7 @@
           </div>
           <input type="range" id="wantFps" min="0" max="4" step="1" value="4">
           <div class="qhead" style="margin-top:12px">
-            <span class="muted">Bitrate up to: <b id="wantBitrateLabel">20 Mbps</b></span>
+            <span class="muted">Bitrate up to: <b id="wantBitrateLabel">100 Mbps</b></span>
           </div>
           <input type="range" id="wantBitrate" min="0" max="1000" step="10" value="1000">
           <div class="muted" id="wantHint" style="margin-top:8px"></div>
@@ -388,7 +388,7 @@ const RES_MIN_PCT = 10;
 const RES_MAX_PCT = 100;
 const FPS_STOPS = [15, 24, 30, 60, 120];
 const MIN_BITRATE = 200000;
-const MAX_BITRATE = 20000000;
+const MAX_BITRATE = 100000000; // 100 Mbps: plenty for high-res/high-fps on a LAN
 
 const $ = (id) => document.getElementById(id);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
