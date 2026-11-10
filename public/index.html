@@ -17,7 +17,7 @@
     background: #101418;
     color: #e8e8e8;
   }
-  .card { width: 100%; max-width: 760px; }
+  .card { width: 100%; max-width: 980px; }
   h1 { font-size: 1.35rem; margin: 0 0 4px; }
   .muted { color: #8b98a5; font-size: 0.85rem; }
   .modes { display: flex; gap: 12px; margin: 20px 0 14px; }
@@ -33,10 +33,10 @@
     user-select: none;
   }
   .modes label.active { border-color: #4f9cf9; background: #14212e; }
-  input[type="text"] {
-    width: 100%;
+  .row { display: flex; gap: 8px; }
+  .row input {
+    flex: 1;
     padding: 10px 12px;
-    margin: 8px 0 12px;
     border: 1px solid #2c343d;
     border-radius: 10px;
     background: #161b21;
@@ -53,15 +53,43 @@
     cursor: pointer;
   }
   button:disabled { opacity: 0.45; cursor: default; }
-  #stopBtn { background: #c0392b; margin-top: 4px; }
-  video {
+  #stopBtn { background: #c0392b; }
+
+  .tiles {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 14px;
+    margin-top: 16px;
+  }
+  .tile { border: 1px solid #2c343d; border-radius: 10px; overflow: hidden; background: #161b21; }
+  .tile header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 10px;
+    border-bottom: 1px solid #232a32;
+  }
+  .tile .meta { flex: 1; min-width: 0; }
+  .tile .addr {
+    font-size: 0.72rem;
+    color: #8b98a5;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .tile .status { font-size: 0.78rem; margin-top: 2px; }
+  .tile .rm { background: #2a3138; color: #e8e8e8; padding: 2px 10px; font-size: 0.9rem; }
+  .tile video { display: block; width: 100%; aspect-ratio: 16/9; background: #000; }
+
+  #preview {
     display: none;
     width: 100%;
     margin-top: 18px;
     border-radius: 10px;
     background: #000;
   }
-  #status { margin-top: 14px; font-size: 1rem; }
+  #castStatus { margin-top: 14px; font-size: 1rem; }
+  #viewerCount { font-weight: 600; margin-top: 4px; }
   #log {
     margin-top: 8px;
     max-height: 130px;
@@ -79,31 +107,34 @@
     <div class="muted" id="myAddr">Detecting your address…</div>
 
     <div class="modes">
-      <label id="modeWatchLabel"><input type="radio" name="mode" value="watch" checked> Watch a broadcast</label>
+      <label id="modeWatchLabel"><input type="radio" name="mode" value="watch" checked> Watch broadcasts</label>
       <label id="modeCastLabel"><input type="radio" name="mode" value="broadcast"> Broadcast my screen</label>
     </div>
 
     <div id="watchPane">
-      <div class="muted">Enter the address of the machine that is broadcasting to you.</div>
-      <input type="text" id="watchAddr" placeholder="e.g. 192.168.1.20:8080" autocomplete="off" spellcheck="false">
-      <button id="watchBtn">Watch</button>
+      <div class="muted">Add the address of each broadcaster you want to watch — every address becomes its own live tile, and you can watch several at once.</div>
+      <div class="row" style="margin-top:10px">
+        <input type="text" id="watchAddr" placeholder="e.g. 192.168.1.20:8080" autocomplete="off" spellcheck="false">
+        <button id="addBtn">Add stream</button>
+      </div>
+      <div id="tiles" class="tiles"></div>
     </div>
 
     <div id="castPane" hidden>
-      <div class="muted">Enter the address of the machine that should watch you.</div>
-      <input type="text" id="castAddr" placeholder="e.g. 192.168.1.30:8080" autocomplete="off" spellcheck="false">
-      <button id="castBtn">Choose what to share &amp; broadcast</button>
+      <div class="muted">Pick what to share — everyone who adds your address (shown above) receives it. Any number of viewers can watch at the same time.</div>
       <div class="muted" style="margin-top:8px">
         Note: browsers only allow screen capture on localhost/HTTPS pages —
         open this page as <b>http://localhost:8080</b> on the broadcasting machine.
       </div>
+      <div class="row" style="margin-top:12px">
+        <button id="castBtn">Choose what to share &amp; broadcast</button>
+        <button id="stopBtn" hidden>Stop broadcast</button>
+      </div>
+      <video id="preview" autoplay playsinline muted controls></video>
+      <div id="castStatus"></div>
+      <div id="viewerCount"></div>
+      <div id="log"></div>
     </div>
-
-    <button id="stopBtn" hidden>Stop</button>
-
-    <video id="video" autoplay playsinline controls></video>
-    <div id="status"></div>
-    <div id="log"></div>
   </div>
 
 <script>
@@ -111,15 +142,14 @@
 
 const ICE_SERVERS = [{ urls: ['stun:stun.l.google.com:19302'] }];
 const POLL_MS = 600;
-const PAGE_ID = Math.random().toString(36).slice(2); // to skip our own ICE candidates
+const ANSWER_TIMEOUT_MS = 30000;
 
 const $ = (id) => document.getElementById(id);
-const video = $('video');
-let pc = null;
-let running = false;
-
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const setStatus = (msg) => { $('status').textContent = msg; };
+const rand = () => Math.random().toString(36).slice(2, 10);
+const shortId = (s) => String(s).slice(0, 6);
+
+let myAddress = '';
 
 function log(msg) {
   const el = $('log');
@@ -128,7 +158,7 @@ function log(msg) {
 }
 
 function normalizeAddress(input) {
-  let a = input.trim().replace(/^https?:\/\//i, '').replace(/\/+$/, '');
+  let a = String(input || '').trim().replace(/^https?:\/\//i, '').replace(/\/+$/, '');
   if (!a) throw new Error('Enter an address first.');
   if (!a.includes(':')) a += ':8080';
   return 'http://' + a;
@@ -149,181 +179,344 @@ async function getJSON(url) {
   return r.json();
 }
 
-// Store one of OUR signaling messages on OUR OWN server; the other side
-// polls our server for it (they typed our address).
-const putSignal = (path, obj) => post(path, obj);
-
-// Poll the PEER's server (the address we typed) until `pick` returns a value.
-// Retries briefly if the peer is unreachable, then gives up.
-async function pollJSONUntil(url, pick) {
+// Poll `url` until `pick(data)` returns a non-null value. Returns that value.
+// Throws after too many network errors (peer unreachable) or after timeoutMs.
+async function pollUntil(url, pick, isStopped, timeoutMs) {
+  const deadline = timeoutMs ? Date.now() + timeoutMs : Infinity;
   let errors = 0;
-  while (running) {
+  while (!isStopped()) {
+    if (Date.now() > deadline) throw new Error('timed out');
+    let data;
     try {
-      const data = await getJSON(url);
+      data = await getJSON(url);
       errors = 0;
-      const val = pick(data);
-      if (val !== undefined && val !== null) return val;
     } catch (err) {
-      if (errors === 0) log('Cannot reach peer yet (' + err.message + '), retrying…');
-      if (++errors > 20) throw err;
+      if (++errors > 25) throw new Error('peer unreachable (' + err.message + ')');
+      await sleep(POLL_MS);
+      continue;
     }
+    const val = pick(data);
+    if (val !== undefined && val !== null) return val;
     await sleep(POLL_MS);
   }
-  return null;
+  throw new Error('cancelled');
 }
 
-// Trickle ICE: read the peer's candidates from THEIR server and apply them.
-async function pollRemoteIce(peer) {
-  let since = 0;
-  const pending = [];
-  while (running) {
+// ======================= Viewer: stream tiles =======================
+
+// Each tile = one independent connection to one broadcaster. Tiles reconnect
+// automatically (with a fresh attempt id, so no stale ICE candidates) until
+// removed.
+
+function addTile(rawAddress) {
+  const base = normalizeAddress(rawAddress);
+
+  const el = document.createElement('article');
+  el.className = 'tile';
+
+  const header = document.createElement('header');
+  const meta = document.createElement('div');
+  meta.className = 'meta';
+  const addr = document.createElement('div');
+  addr.className = 'addr';
+  addr.textContent = base.replace(/^http:\/\//, '');
+  const status = document.createElement('div');
+  status.className = 'status';
+  meta.append(addr, status);
+  const rm = document.createElement('button');
+  rm.className = 'rm';
+  rm.textContent = '✕';
+  header.append(meta, rm);
+
+  const video = document.createElement('video');
+  video.autoplay = true;
+  video.playsInline = true;
+  video.controls = true;
+
+  el.append(header, video);
+  $('tiles').append(el);
+
+  const tile = { base, el, video, status, pc: null, removed: false, releaseHold: null, token: { stopped: false } };
+  rm.addEventListener('click', () => removeTile(tile));
+  runTileLoop(tile);
+}
+
+function setTileStatus(tile, msg) {
+  tile.status.textContent = msg;
+}
+
+function removeTile(tile) {
+  tile.removed = true;
+  tile.token.stopped = true;
+  if (tile.pc) { try { tile.pc.close(); } catch (_) {} tile.pc = null; }
+  if (tile.releaseHold) tile.releaseHold();
+  tile.el.remove();
+}
+
+async function runTileLoop(tile) {
+  while (!tile.removed) {
+    tile.token.stopped = true; // stop loops from the previous attempt
+    const token = (tile.token = { stopped: false });
+    const hold = new Promise((r) => { tile.releaseHold = r; }); // resolves when connection/stream ends
     try {
-      const { candidates, next } = await getJSON(peer + '/signal/ice?since=' + since);
-      since = next;
-      pending.push(...candidates.filter((c) => c.from !== PAGE_ID));
-    } catch (_) { /* peer briefly unreachable; keep polling */ }
-    while (pending.length && pc && pc.remoteDescription) {
-      const c = pending.shift();
-      try { await pc.addIceCandidate(c); }
-      catch (err) { log('addIceCandidate failed: ' + err.message); }
+      await connectTile(tile, token);
+      await hold;
+      if (!tile.removed) setTileStatus(tile, 'Connection lost — reconnecting…');
+    } catch (err) {
+      if (tile.removed) break;
+      setTileStatus(tile, 'Error: ' + err.message + ' — retrying…');
+      tile.releaseHold();
+      await sleep(2000);
     }
-    await sleep(POLL_MS);
   }
+  tile.releaseHold = null;
 }
 
-function attachCommon(pc) {
+async function connectTile(tile, token) {
+  if (tile.pc) { try { tile.pc.close(); } catch (_) {} tile.pc = null; }
+  setTileStatus(tile, 'Waiting for broadcaster…');
+
+  const sid = await pollUntil(tile.base + '/signal/announce', (d) => d.sid, () => tile.removed || token.stopped);
+  if (tile.removed || token.stopped) return;
+
+  const aid = rand();
+  const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+  tile.pc = pc;
+  tile.video.srcObject = null;
+  pc.addTransceiver('video', { direction: 'recvonly' });
+  pc.addTransceiver('audio', { direction: 'recvonly' });
+
+  pc.ontrack = (e) => {
+    tile.video.srcObject = e.streams[0];
+    setTileStatus(tile, 'Watching.');
+    for (const t of e.streams[0].getTracks()) {
+      t.addEventListener('ended', () => tile.releaseHold && tile.releaseHold());
+    }
+  };
   pc.onicecandidate = (e) => {
-    if (e.candidate) putSignal('/signal/ice', Object.assign(e.candidate.toJSON(), { from: PAGE_ID }));
+    if (e.candidate) {
+      post(tile.base + '/signal/viewer-ice', Object.assign({ sid: sid, aid: aid }, e.candidate.toJSON())).catch(() => {});
+    }
   };
   pc.onconnectionstatechange = () => {
-    const s = pc && pc.connectionState;
-    if (s === 'connected') setStatus('Connected.');
-    else if (s === 'failed') setStatus('Connection failed.');
-    else if (s === 'disconnected' || s === 'closed') setStatus('Disconnected.');
+    const s = pc.connectionState;
+    if (s === 'connected') setTileStatus(tile, 'Watching.');
+    else if (s === 'disconnected') setTileStatus(tile, 'Connection unstable…');
+    else if (s === 'failed' || s === 'closed') {
+      setTileStatus(tile, 'Connection lost.');
+      if (tile.releaseHold) tile.releaseHold();
+    }
   };
+
+  await pc.setLocalDescription(await pc.createOffer());
+  await post(tile.base + '/signal/viewer-offer', { sid: sid, aid: aid, type: 'offer', sdp: pc.localDescription.sdp });
+  setTileStatus(tile, 'Waiting for broadcaster to accept…');
+
+  const answer = await pollUntil(
+    tile.base + '/signal/answer?sid=' + encodeURIComponent(sid) + '&aid=' + encodeURIComponent(aid),
+    (d) => d.data,
+    () => tile.removed || token.stopped,
+    ANSWER_TIMEOUT_MS
+  );
+  await pc.setRemoteDescription({ type: answer.type, sdp: answer.sdp });
+  setTileStatus(tile, 'Connecting…');
+
+  pollCasterIce(tile, sid, aid, token); // background loop for this attempt
 }
 
-// ---------------- Broadcaster ----------------
+// Candidates are scoped to (sid, aid) on the server, so only candidates that
+// belong to this exact connection attempt are ever applied here.
+async function pollCasterIce(tile, sid, aid, token) {
+  let since = 0;
+  const pending = [];
+  while (!tile.removed && !token.stopped) {
+    try {
+      const d = await getJSON(
+        tile.base + '/signal/caster-ice?sid=' + encodeURIComponent(sid) + '&aid=' + encodeURIComponent(aid) + '&since=' + since
+      );
+      since = d.next;
+      pending.push.apply(pending, d.candidates);
+    } catch (_) { /* broadcaster briefly unreachable; keep polling */ }
+    while (pending.length && tile.pc && tile.pc.remoteDescription) {
+      const c = pending.shift();
+      try { await tile.pc.addIceCandidate(c); }
+      catch (_) { /* candidate for an already-dead attempt; safe to ignore */ }
+    }
+    await sleep(POLL_MS);
+  }
+}
 
-async function startBroadcast(peer) {
+// ======================= Broadcaster =======================
+
+const cast = { running: false, sid: null, stream: null, pcs: new Map(), tokens: [] };
+
+function updateViewerCount() {
+  $('viewerCount').textContent = 'Viewers: ' + cast.pcs.size;
+}
+
+async function startBroadcast() {
+  if (cast.running) return;
+
   // The browser shows its native picker: entire screen, window or browser tab.
   const stream = await navigator.mediaDevices.getDisplayMedia({
     video: { frameRate: 30 },
     audio: true,
   });
 
+  cast.stream = stream;
+  cast.running = true;
+  cast.sid = rand();
+  cast.pcs = new Map();
+  cast.tokens = [];
+
   stream.getVideoTracks()[0].addEventListener('ended', () => {
     log('Screen sharing ended.');
-    stopSession();
-    setStatus('Stopped sharing.');
+    stopBroadcast();
   });
 
-  pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
-  for (const track of stream.getTracks()) pc.addTrack(track, stream);
-  attachCommon(pc);
+  await post('/signal/announce', { sid: cast.sid });
 
-  // Local preview of what is being sent.
-  video.srcObject = stream;
-  video.muted = true;
-  video.style.display = 'block';
-
-  await pc.setLocalDescription(await pc.createOffer());
-  await putSignal('/signal/offer', pc.localDescription);
-  log('Offer published — waiting for the viewer…');
-  setStatus('Waiting for viewer…');
-
-  const answer = await pollJSONUntil(peer + '/signal/answer', (d) => d.data);
-  if (!running || !pc || !answer) return;
-
-  await pc.setRemoteDescription(answer);
-  log('Received the viewer\u2019s answer.');
-  setStatus('Connecting…');
-
-  await pollRemoteIce(peer);
-}
-
-// ---------------- Viewer ----------------
-
-async function startWatching(peer) {
-  pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
-  attachCommon(pc);
-  pc.ontrack = (e) => {
-    video.srcObject = e.streams[0];
-    video.muted = false;
-    video.style.display = 'block';
-    setStatus('Receiving broadcast…');
-  };
-
-  setStatus('Waiting for the broadcaster…');
-  const offer = await pollJSONUntil(peer + '/signal/offer', (d) => d.data);
-  if (!running || !pc || !offer) return;
-
-  log('Received offer from the broadcaster.');
-  await pc.setRemoteDescription(offer);
-  await pc.setLocalDescription(await pc.createAnswer());
-  await putSignal('/signal/answer', pc.localDescription);
-  log('Answer published.');
-  setStatus('Connecting…');
-
-  await pollRemoteIce(peer);
-}
-
-// ---------------- UI wiring ----------------
-
-function beginSession() {
-  running = true;
-  $('watchBtn').disabled = true;
+  $('preview').srcObject = stream;
+  $('preview').style.display = 'block';
   $('castBtn').disabled = true;
   $('stopBtn').hidden = false;
   $('log').textContent = '';
-  setStatus('');
+  updateViewerCount();
+  log('Broadcast started (session ' + shortId(cast.sid) + ').');
+  $('castStatus').textContent = myAddress
+    ? 'Broadcasting — tell viewers to add ' + myAddress + ' on their page.'
+    : 'Broadcasting — tell viewers to add this server\u2019s address on their page.';
+
+  const offersToken = { stopped: false };
+  const iceToken = { stopped: false };
+  cast.tokens.push(offersToken, iceToken);
+  pollViewerOffers(offersToken);
+  pollViewerIce(iceToken);
 }
 
-function stopSession() {
-  running = false;
-  if (pc) { try { pc.close(); } catch (_) {} pc = null; }
-  video.srcObject = null;
-  video.style.display = 'none';
-  $('watchBtn').disabled = false;
+// Every viewer offer (each with a unique aid) gets its own peer connection,
+// all sending the same captured stream.
+async function pollViewerOffers(token) {
+  let since = 0;
+  while (cast.running && !token.stopped) {
+    let d = null;
+    try {
+      d = await getJSON('/signal/viewer-offers?sid=' + encodeURIComponent(cast.sid) + '&since=' + since);
+    } catch (_) {}
+    if (d) {
+      since = d.next;
+      for (const offer of d.offers) {
+        acceptViewer(offer).catch((err) => log('Could not accept viewer: ' + err.message));
+      }
+    }
+    await sleep(POLL_MS);
+  }
+}
+
+async function acceptViewer(offer) {
+  if (!cast.running || cast.pcs.has(offer.aid)) return;
+
+  const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+  cast.pcs.set(offer.aid, pc);
+  for (const track of cast.stream.getTracks()) pc.addTrack(track, cast.stream);
+
+  pc.onicecandidate = (e) => {
+    if (e.candidate) {
+      post('/signal/caster-ice', Object.assign({ sid: cast.sid, aid: offer.aid }, e.candidate.toJSON())).catch(() => {});
+    }
+  };
+  pc.onconnectionstatechange = () => {
+    const s = pc.connectionState;
+    if (s === 'connected') {
+      log('Viewer ' + shortId(offer.aid) + ' connected.');
+      updateViewerCount();
+    } else if (s === 'failed' || s === 'closed') {
+      log('Viewer ' + shortId(offer.aid) + ' left.');
+      cast.pcs.delete(offer.aid);
+      try { pc.close(); } catch (_) {}
+      updateViewerCount();
+    }
+  };
+
+  await pc.setRemoteDescription({ type: 'offer', sdp: offer.sdp });
+  await pc.setLocalDescription(await pc.createAnswer());
+  await post('/signal/answer', { sid: cast.sid, aid: offer.aid, type: 'answer', sdp: pc.localDescription.sdp });
+  log('Accepted viewer ' + shortId(offer.aid) + ' — waiting for it to connect.');
+  updateViewerCount();
+}
+
+// Route each viewer candidate to the peer connection with a matching aid.
+// Candidates arriving before the offer is processed are requeued briefly.
+async function pollViewerIce(token) {
+  let since = 0;
+  const pending = [];
+  while (cast.running && !token.stopped) {
+    try {
+      const d = await getJSON('/signal/viewer-ice?sid=' + encodeURIComponent(cast.sid) + '&since=' + since);
+      since = d.next;
+      for (const c of d.candidates) pending.push({ aid: c.aid, candidate: c.candidate, tries: 0 });
+    } catch (_) {}
+    for (let i = 0; i < pending.length; ) {
+      const c = pending[i];
+      const pc = cast.pcs.get(c.aid);
+      if (!pc || !pc.remoteDescription) {
+        if (++c.tries > 30) { pending.splice(i, 1); continue; } // give up on stale candidate
+        i++;
+        continue;
+      }
+      pending.splice(i, 1);
+      try { await pc.addIceCandidate(c.candidate); }
+      catch (err) { log('addIceCandidate failed: ' + err.message); }
+    }
+    await sleep(POLL_MS);
+  }
+}
+
+function stopBroadcast() {
+  if (!cast.running) return;
+  cast.running = false;
+  for (const t of cast.tokens) t.stopped = true;
+  cast.tokens = [];
+  for (const pc of cast.pcs.values()) { try { pc.close(); } catch (_) {} }
+  cast.pcs.clear();
+  if (cast.stream) {
+    for (const t of cast.stream.getTracks()) t.stop();
+    cast.stream = null;
+  }
+  post('/signal/announce', { sid: null }).catch(() => {});
+  $('preview').srcObject = null;
+  $('preview').style.display = 'none';
   $('castBtn').disabled = false;
   $('stopBtn').hidden = true;
+  $('viewerCount').textContent = '';
+  $('castStatus').textContent = 'Stopped.';
+  log('Broadcast stopped.');
 }
 
-function fail(err) {
-  stopSession();
-  setStatus('Error: ' + ((err && err.message) || err));
-  log('Error: ' + ((err && err.message) || err));
-}
+// ======================= UI wiring =======================
 
-$('watchBtn').addEventListener('click', async () => {
-  let peer;
-  try { peer = normalizeAddress($('watchAddr').value); }
-  catch (err) { return fail(err); }
-  beginSession();
-  try { await startWatching(peer); }
-  catch (err) { fail(err); }
+$('addBtn').addEventListener('click', () => {
+  try { addTile($('watchAddr').value); }
+  catch (err) { alert(err.message); }
+});
+$('watchAddr').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') $('addBtn').click();
 });
 
 $('castBtn').addEventListener('click', async () => {
-  let peer;
-  try { peer = normalizeAddress($('castAddr').value); }
-  catch (err) { return fail(err); }
-  beginSession();
-  try { await startBroadcast(peer); }
-  catch (err) {
-    if (err && err.name === 'NotAllowedError') {
-      log('Screen selection cancelled.');
-      stopSession();
-    } else {
-      fail(err);
+  try {
+    await startBroadcast();
+  } catch (err) {
+    const cancelled = err && err.name === 'NotAllowedError';
+    stopBroadcast(); // no-op if sharing was cancelled before anything started
+    if (cancelled) log('Screen selection cancelled.');
+    else {
+      $('castStatus').textContent = 'Error: ' + ((err && err.message) || err);
+      log('Error: ' + ((err && err.message) || err));
     }
   }
 });
-
-$('stopBtn').addEventListener('click', () => {
-  stopSession();
-  setStatus('Stopped.');
-});
+$('stopBtn').addEventListener('click', stopBroadcast);
 
 function updatePanes() {
   const mode = document.querySelector('input[name="mode"]:checked').value;
@@ -335,13 +528,20 @@ function updatePanes() {
 document.querySelectorAll('input[name="mode"]').forEach((r) => r.addEventListener('change', updatePanes));
 updatePanes();
 
-// Show this machine's address so the other person knows what to type.
+// If this page was opened from a broadcaster's server (not localhost), the
+// broadcaster's address is already location.host — prefill it.
+if (location.host && !/^(localhost|127\.)/.test(location.hostname)) {
+  $('watchAddr').value = location.host;
+}
+
+// Show this machine's address so viewers know what to type.
 fetch('/my-address')
   .then((r) => r.json())
   .then((info) => {
     const addrs = info.ips.map((ip) => ip + ':' + info.port);
+    myAddress = addrs[0] || location.host || '';
     $('myAddr').textContent = addrs.length
-      ? 'Your address (give it to the other person):  ' + addrs.join('   or   ')
+      ? 'Your address (viewers add this to watch you):  ' + addrs.join('   or   ')
       : 'Could not detect a LAN address. Server port: ' + info.port;
   })
   .catch(() => { $('myAddr').textContent = ''; });
