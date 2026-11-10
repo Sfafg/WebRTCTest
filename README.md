@@ -27,12 +27,19 @@ address — they can open the page served by the broadcaster
   dialog. Give your address (shown on the page) to everyone who should watch.
   Any number of viewers can connect at the same time; each gets its own
   peer connection carrying the same stream.
-- **Quality slider** — before or during a broadcast, pick *Low / Medium / High
-  / Ultra*. It caps the captured frame rate and downscales the encoded stream
-  (e.g. a 4K screen is encoded at 540p on *Medium*), plus limits the bitrate.
-  Changes apply live to every connected viewer and need no reconnection. Lower
-  presets are the main way to cut CPU/GPU usage on weak devices — both the
-  broadcaster (capture + encode) and viewers (decode + render) benefit.
+- **Quality controls** — three independent sliders, adjustable before or
+  during a broadcast: **Resolution** (10%–100% multiplier of the native capture
+  size, so odd/ultrawide/window captures scale proportionally; 100% = full
+  resolution), **Frame rate** (15 / 24 / 30 / 60 / 120 fps) and **Bitrate**
+  (200 kbps – 20 Mbps, logarithmic scale). 60/120 fps needs a display that
+  fast and a strong encoder. The resolution label shows both the multiplier and
+  the absolute output size (estimated from the screen with `≈` before sharing,
+  exact from the capture afterwards and kept up to date if the shared window is
+  resized); the hint line adds frame rate, bitrate and approximate traffic per
+  viewer (MB/min). Changes apply live to every connected viewer and need no
+  reconnection. Lower settings are the main way to cut CPU/GPU usage on weak
+  devices — both the broadcaster (capture + encode) and viewers (decode +
+  render) benefit.
 - **Watch** — pick *Watch broadcasts* and add the address of each broadcaster
   (e.g. `192.168.1.20:8080`). Every added address becomes its own live video
   tile, so one page can watch several broadcasts (or several tiles of the
@@ -66,4 +73,6 @@ to a new connection.
   broadcaster, so many simultaneous viewers cost the broadcaster CPU. Use a
   lower quality preset when broadcasting to several low-end machines at once.
   The page also polls signaling less often once a connection is established to
-  save background CPU.
+  save background CPU. The viewer count only includes live connections; failed
+  attempts and viewers that vanish are dropped automatically (8 s grace for a
+  network hiccup, 30 s for an unfinished handshake).

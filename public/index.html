@@ -242,12 +242,22 @@
         </div>
         <div class="quality">
           <div class="qhead">
-            <span class="muted">Stream quality: <b id="qualityLabel">Medium</b></span>
-            <span class="muted" id="qualityHint"></span>
+            <span class="muted">Resolution: <b id="resolutionLabel">50%</b></span>
           </div>
-          <input type="range" id="quality" min="0" max="3" step="1" value="1">
+          <input type="range" id="resolution" min="10" max="100" step="5" value="50">
+          <div class="qhead" style="margin-top:12px">
+            <span class="muted">Frame rate: <b id="fpsLabel">24 fps</b></span>
+          </div>
+          <input type="range" id="fps" min="0" max="4" step="1" value="1">
+          <div class="qhead" style="margin-top:12px">
+            <span class="muted">Bitrate: <b id="bitrateLabel">1.0 Mbps</b></span>
+          </div>
+          <input type="range" id="bitrate" min="0" max="1000" step="10" value="350">
+          <div class="muted" id="qualityHint" style="margin-top:8px"></div>
           <div class="muted" style="margin-top:6px">
-            Lower quality = less CPU/GPU on the broadcaster and on viewers. Changes apply live to everyone watching.
+            Resolution scales the native capture size (100% = full, works for any odd/ultrawide/window size).
+            60/120 fps needs a display that fast and more CPU/GPU. Bitrate is a cap for each viewer.
+            Changes apply live to everyone watching.
           </div>
         </div>
         <div class="row" style="margin-top:12px">
@@ -280,15 +290,15 @@ const ANSWER_TIMEOUT_MS = 30000;
 const MIN_W = 200;
 const MIN_H = 140;
 
-// Quality presets for the outgoing stream. Keeping the encoded resolution,
-// frame rate and bitrate low is the single biggest CPU/GPU saving on both the
-// broadcaster (capture + encode) and viewers (decode + render).
-const QUALITY_PRESETS = [
-  { name: 'Low',    width: 640,  height: 360,  fps: 15, maxBitrate: 400000 },
-  { name: 'Medium', width: 960,  height: 540,  fps: 24, maxBitrate: 1000000 },
-  { name: 'High',   width: 1280, height: 720,  fps: 30, maxBitrate: 2000000 },
-  { name: 'Ultra',  width: 1920, height: 1080, fps: 30, maxBitrate: 4000000 },
-];
+// Quality controls for the outgoing stream. Low settings are the single
+// biggest CPU/GPU saving on both the broadcaster (capture + encode) and the
+// viewers (decode + render). Resolution is a multiplier of the native capture
+// size, so it works for any (nonstandard) source size or aspect ratio.
+const RES_MIN_PCT = 10;
+const RES_MAX_PCT = 100;
+const FPS_STOPS = [15, 24, 30, 60, 120];
+const MIN_BITRATE = 200000;
+const MAX_BITRATE = 20000000;
 
 const $ = (id) => document.getElementById(id);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -626,44 +636,84 @@ async function pollCasterIce(tile, sid, aid, token) {
 
 // ======================= Stream quality =======================
 
-function currentPreset() {
-  return QUALITY_PRESETS[Number($('quality').value)] || QUALITY_PRESETS[1];
+// The bitrate slider is logarithmic so low values stay easy to fine-tune.
+function bitrateFromSlider() {
+  const t = Math.min(1000, Math.max(0, Number($('bitrate').value) || 0)) / 1000;
+  const bps = MIN_BITRATE * Math.pow(MAX_BITRATE / MIN_BITRATE, t);
+  return Math.round(bps / 10000) * 10000;
+}
+
+function formatBitrate(bps) {
+  return bps >= 1000000
+    ? (bps / 1000000).toFixed(bps >= 10000000 ? 0 : 1) + ' Mbps'
+    : Math.round(bps / 1000) + ' kbps';
+}
+
+function captureSize() {
+  try {
+    const s = cast.stream && cast.stream.getVideoTracks()[0].getSettings();
+    if (s && s.width && s.height) return { width: s.width, height: s.height };
+  } catch (_) {}
+  return null;
+}
+
+// Rough guess of the capture size before sharing starts, from the screen.
+function screenSize() {
+  const dpr = window.devicePixelRatio || 1;
+  const width = Math.round((screen.width || 0) * dpr);
+  const height = Math.round((screen.height || 0) * dpr);
+  return width && height ? { width, height } : null;
+}
+
+function currentSettings() {
+  const pct = Math.min(RES_MAX_PCT, Math.max(RES_MIN_PCT, Number($('resolution').value) || 50));
+  const mult = pct / 100;
+  const fps = FPS_STOPS[Number($('fps').value)] || 30;
+  return { mult, fps, bitrate: bitrateFromSlider() };
 }
 
 function updateQualityLabel() {
-  const p = currentPreset();
-  $('qualityLabel').textContent = p.name;
+  const s = currentSettings();
+  const pct = Math.round(s.mult * 100);
+  const actual = captureSize();
+  const base = actual || screenSize();
+  const approx = actual ? '' : '\u2248';
+  const abs = base
+    ? approx + Math.round(base.width * s.mult) + '\u00d7' + Math.round(base.height * s.mult)
+    : '';
+  $('resolutionLabel').textContent = pct + '%' + (abs ? ' \u00b7 ' + abs : '');
+  $('fpsLabel').textContent = s.fps + ' fps';
+  $('bitrateLabel').textContent = formatBitrate(s.bitrate);
+  const size = base
+    ? (approx ? 'of ' + approx + base.width + '\u00d7' + base.height + ' screen' : 'of ' + base.width + '\u00d7' + base.height)
+    : '';
+  const mbPerMin = (s.bitrate * 60 / 8 / 1e6).toFixed(1);
   $('qualityHint').textContent =
-    p.width + '\u00d7' + p.height + ' \u00b7 ' + p.fps + ' fps \u00b7 ' + Math.round(p.maxBitrate / 1000) + ' kbps';
+    (size ? size + ' \u00b7 ' : '') + s.fps + ' fps \u00b7 ' + formatBitrate(s.bitrate) +
+    ' \u00b7 \u2248 ' + mbPerMin + ' MB/min per viewer';
 }
 
-// Limit the capture itself (frame rate is supported everywhere; downscaling
-// of the capture track is optional and ignored where unsupported).
-async function applyCaptureConstraints(preset) {
+// Limit the capture frame rate (supported everywhere); resolution is handled
+// at the encoder so odd source sizes are scaled proportionally.
+async function applyCaptureConstraints(settings) {
   const track = cast.stream && cast.stream.getVideoTracks()[0];
   if (!track) return;
-  try { await track.applyConstraints({ frameRate: { max: preset.fps } }); } catch (_) {}
-  try { await track.applyConstraints({ width: { max: preset.width }, height: { max: preset.height } }); } catch (_) {}
+  try { await track.applyConstraints({ frameRate: { max: settings.fps } }); } catch (_) {}
 }
 
-// Downscale the encoded stream to the preset height, cap frame rate/bitrate.
-// This cuts encoder CPU/GPU a lot (a 4K screen gets encoded at e.g. 540p) and
-// makes viewers decode less, without requiring renegotiation.
-async function applyQualityToSender(sender, preset) {
-  let srcHeight = 0;
-  try {
-    const s = cast.stream.getVideoTracks()[0].getSettings();
-    srcHeight = s.height || 0;
-  } catch (_) {}
-  const scale = srcHeight > 0 ? Math.max(1, srcHeight / preset.height) : 1;
+// Scale the encoded stream by the resolution multiplier, cap frame rate and
+// bitrate. This cuts encoder CPU/GPU a lot and makes viewers decode less,
+// without requiring renegotiation.
+async function applyQualityToSender(sender, settings) {
+  const scale = Math.max(1, 1 / settings.mult);
 
   const build = (withFps) => {
     const params = sender.getParameters();
     if (!params.encodings || params.encodings.length === 0) params.encodings = [{}];
     const enc = params.encodings[0];
-    enc.maxBitrate = preset.maxBitrate;
+    enc.maxBitrate = settings.bitrate;
     enc.scaleResolutionDownBy = scale;
-    if (withFps) enc.maxFramerate = preset.fps;
+    if (withFps) enc.maxFramerate = settings.fps;
     params.degradationPreference = 'balanced';
     return params;
   };
@@ -676,13 +726,13 @@ async function applyQualityToSender(sender, preset) {
 }
 
 async function applyQuality() {
-  const preset = currentPreset();
+  const settings = currentSettings();
   if (!cast.running) return;
-  await applyCaptureConstraints(preset);
+  await applyCaptureConstraints(settings);
   for (const pc of cast.pcs.values()) {
     for (const sender of pc.getSenders()) {
       if (sender.track && sender.track.kind === 'video') {
-        applyQualityToSender(sender, preset).catch(() => {});
+        applyQualityToSender(sender, settings).catch(() => {});
       }
     }
   }
@@ -690,20 +740,35 @@ async function applyQuality() {
 
 // ======================= Broadcaster =======================
 
-const cast = { running: false, sid: null, stream: null, pcs: new Map(), tokens: [] };
+const cast = { running: false, sid: null, stream: null, pcs: new Map(), tokens: [], uiTimer: null };
 
 function updateViewerCount() {
-  $('viewerCount').textContent = 'Viewers: ' + cast.pcs.size;
+  let connected = 0;
+  for (const pc of cast.pcs.values()) {
+    if (pc.connectionState === 'connected') connected++;
+  }
+  $('viewerCount').textContent = 'Viewers: ' + connected;
+}
+
+// Remove a viewer's peer connection. Viewers reconnect with a fresh attempt
+// id, so dropping the old, dead one keeps the count (and CPU use) accurate.
+function dropViewer(aid, reason) {
+  const pc = cast.pcs.get(aid);
+  if (!pc) return;
+  cast.pcs.delete(aid);
+  try { pc.close(); } catch (_) {}
+  log('Viewer ' + shortId(aid) + ' left (' + reason + ').');
+  updateViewerCount();
 }
 
 async function startBroadcast() {
   if (cast.running) return;
 
   // The browser shows its native picker: entire screen, window or browser tab.
-  // Start at the selected quality's frame rate (lower = less CPU/GPU).
-  const preset = currentPreset();
+  // Start at the selected frame rate (lower = less CPU/GPU).
+  const settings = currentSettings();
   const stream = await navigator.mediaDevices.getDisplayMedia({
-    video: { frameRate: { ideal: preset.fps, max: preset.fps } },
+    video: { frameRate: { ideal: settings.fps, max: settings.fps } },
     audio: true,
   });
 
@@ -717,6 +782,8 @@ async function startBroadcast() {
     log('Screen sharing ended.');
     stopBroadcast();
   });
+
+  updateQualityLabel(); // now that the native capture size is known
 
   await post('/signal/announce', { sid: cast.sid });
 
@@ -771,32 +838,46 @@ async function acceptViewer(offer) {
       post('/signal/caster-ice', Object.assign({ sid: cast.sid, aid: offer.aid }, e.candidate.toJSON())).catch(() => {});
     }
   };
+
+  const timers = { handshake: 0, grace: 0 };
+  // Viewers that vanish mid-handshake (closed tab, dropped network) must not
+  // linger forever in the count.
+  timers.handshake = setTimeout(() => dropViewer(offer.aid, 'handshake timeout'), 30000);
+
   pc.onconnectionstatechange = () => {
     const s = pc.connectionState;
     if (s === 'connected') {
+      clearTimeout(timers.handshake);
+      clearTimeout(timers.grace);
       log('Viewer ' + shortId(offer.aid) + ' connected.');
       // Encoding parameters are only reliably accepted after negotiation.
-      const preset = currentPreset();
+      const settings = currentSettings();
       for (const sender of pc.getSenders()) {
         if (sender.track && sender.track.kind === 'video') {
-          applyQualityToSender(sender, preset).catch(() => {});
+          applyQualityToSender(sender, settings).catch(() => {});
         }
       }
       updateViewerCount();
-    } else if (s === 'failed' || s === 'closed') {
-      log('Viewer ' + shortId(offer.aid) + ' left.');
-      cast.pcs.delete(offer.aid);
-      try { pc.close(); } catch (_) {}
+    } else if (s === 'disconnected') {
+      // Brief network hiccup: give it a few seconds to recover, then drop it.
+      clearTimeout(timers.grace);
+      timers.grace = setTimeout(() => {
+        if (pc.connectionState !== 'connected') dropViewer(offer.aid, 'disconnected');
+      }, 8000);
       updateViewerCount();
+    } else if (s === 'failed' || s === 'closed') {
+      clearTimeout(timers.handshake);
+      clearTimeout(timers.grace);
+      dropViewer(offer.aid, 'connection ' + s);
     }
   };
 
   await pc.setRemoteDescription({ type: 'offer', sdp: offer.sdp });
   await pc.setLocalDescription(await pc.createAnswer());
   await post('/signal/answer', { sid: cast.sid, aid: offer.aid, type: 'answer', sdp: pc.localDescription.sdp });
-  const preset = currentPreset();
+  const settings = currentSettings();
   for (const sender of pc.getSenders()) {
-    if (sender.track && sender.track.kind === 'video') applyQualityToSender(sender, preset).catch(() => {});
+    if (sender.track && sender.track.kind === 'video') applyQualityToSender(sender, settings).catch(() => {});
   }
   log('Accepted viewer ' + shortId(offer.aid) + ' — waiting for it to connect.');
   updateViewerCount();
@@ -836,6 +917,8 @@ async function pollViewerIce(token) {
 function stopBroadcast() {
   if (!cast.running) return;
   cast.running = false;
+  clearInterval(cast.uiTimer);
+  cast.uiTimer = null;
   for (const t of cast.tokens) t.stopped = true;
   cast.tokens = [];
   for (const pc of cast.pcs.values()) { try { pc.close(); } catch (_) {} }
@@ -844,6 +927,7 @@ function stopBroadcast() {
     for (const t of cast.stream.getTracks()) t.stop();
     cast.stream = null;
   }
+  updateQualityLabel();
   post('/signal/announce', { sid: null }).catch(() => {});
   $('preview').srcObject = null;
   $('preview').style.display = 'none';
@@ -879,10 +963,16 @@ $('castBtn').addEventListener('click', async () => {
 });
 $('stopBtn').addEventListener('click', stopBroadcast);
 
-$('quality').addEventListener('input', () => {
-  updateQualityLabel();
+for (const id of ['resolution', 'fps', 'bitrate']) {
+  $(id).addEventListener('input', () => {
+updateQualityLabel();
+window.addEventListener('resize', updateQualityLabel);
   applyQuality().catch(() => {});
-});
+  // Keep the absolute resolution current if the shared window is resized.
+  clearInterval(cast.uiTimer);
+  cast.uiTimer = setInterval(updateQualityLabel, 2000);
+  });
+}
 updateQualityLabel();
 
 function updatePanes() {
