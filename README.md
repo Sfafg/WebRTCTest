@@ -86,8 +86,15 @@ and applies the per-connection minimum.
 - Performance: without an SFU each viewer gets its own encoder on the
   broadcaster, so many simultaneous viewers cost the broadcaster CPU. Use a
   lower quality preset when broadcasting to several low-end machines at once.
-  The page also polls signaling less often once a connection is established to
-  save background CPU. The viewer count only includes live connections; failed
+  Weak devices (4 or fewer CPU threads / 4 GB or less RAM) start from a lighter
+  preset (25% resolution, 15 fps, ~500 kbps) instead of the defaults. The
+  broadcaster pane shows a live **Encoding** line (output size, fps, bitrate,
+  codec, hardware/software encoder and the encoder's own limitation reason),
+  which is the quickest way to see where the CPU goes. Once a viewer connection
+  is established its ICE polling stops altogether (a reconnect starts it
+  again), so idle viewers cost almost nothing. The page also slows signaling
+  polling after setup and skips UI/stat updates while the tab is in the
+  background. The viewer count only includes live connections; failed
   attempts and viewers that vanish are dropped automatically (8 s grace for a
   network hiccup, 30 s for an unfinished handshake).
 - GPU use: screen sharing normally negotiates **VP8**, which browsers encode

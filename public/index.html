@@ -295,6 +295,7 @@
         <video id="preview" autoplay playsinline muted controls></video>
         <div id="castStatus"></div>
         <div id="viewerCount"></div>
+        <div class="muted" id="perf"></div>
         <div id="log"></div>
       </div>
 
@@ -341,7 +342,9 @@ let myAddress = '';
 
 function log(msg) {
   const el = $('log');
-  el.textContent += '[' + new Date().toLocaleTimeString() + '] ' + msg + '\n';
+  // Keep the log bounded: an ever-growing text node costs layout time.
+  const lines = (el.textContent + '[' + new Date().toLocaleTimeString() + '] ' + msg).split('\n');
+  el.textContent = lines.slice(-60).join('\n') + '\n';
   el.scrollTop = el.scrollHeight;
 }
 
@@ -653,6 +656,7 @@ async function connectTile(tile, token) {
 async function pollCasterIce(tile, sid, aid, token) {
   let since = 0;
   const pending = [];
+  let idleConnected = 0;
   while (!tile.removed && !token.stopped) {
     try {
       const d = await getJSON(
@@ -666,8 +670,15 @@ async function pollCasterIce(tile, sid, aid, token) {
       try { await tile.pc.addIceCandidate(c); }
       catch (_) { /* candidate for an already-dead attempt; safe to ignore */ }
     }
-    // Once media is flowing, poll less often to save CPU on weak devices.
+    // Candidates only matter while setting up. Once media flows and nothing is
+    // left to apply, stop polling entirely (a reconnect starts a fresh loop);
+    // this keeps idle CPU/battery use near zero on weak devices.
     const connected = tile.pc && tile.pc.connectionState === 'connected';
+    if (connected && pending.length === 0) {
+      if (++idleConnected >= 2) return;
+    } else {
+      idleConnected = 0;
+    }
     await sleep(connected ? 2000 : POLL_MS);
   }
 }
@@ -992,6 +1003,53 @@ function updateViewerCount() {
   $('viewerCount').textContent = 'Viewers: ' + connected;
 }
 
+// Show where the broadcaster's CPU goes: encoded size/fps/bitrate, codec and
+// why the encoder is limiting itself. Video encoding dominates CPU usage.
+const perf = { pc: null, bytes: 0, ts: 0 };
+
+async function updatePerf() {
+  const el = $('perf');
+  if (!el) return;
+  if (!cast.running) { el.textContent = ''; return; }
+  if (!cast.pcs.size) {
+    el.textContent = 'Sharing the screen: capture + preview only, encoding starts when a viewer connects.';
+    return;
+  }
+  const pc = cast.pcs.values().next().value;
+  let stats;
+  try { stats = await pc.getStats(); } catch (_) { return; }
+  let video = null;
+  const codecs = new Map();
+  stats.forEach((r) => {
+    if (r.type === 'codec') codecs.set(r.id, r);
+    if (r.type === 'outbound-rtp' && r.kind === 'video') video = r;
+  });
+  if (!video) return;
+  const now = video.timestamp || Date.now();
+  let kbps = null;
+  if (perf.pc === pc && perf.ts && now > perf.ts) {
+    kbps = Math.round(((video.bytesSent - perf.bytes) * 8) / (now - perf.ts));
+  }
+  perf.pc = pc;
+  perf.bytes = video.bytesSent || 0;
+  perf.ts = now;
+  const codec = video.codecId ? codecs.get(video.codecId) : null;
+  const bits = [];
+  if (video.frameWidth && video.frameHeight) bits.push(video.frameWidth + '\u00d7' + video.frameHeight);
+  if (video.framesPerSecond != null) bits.push(Math.round(video.framesPerSecond) + ' fps');
+  if (kbps != null) bits.push(kbps + ' kbps');
+  if (codec) bits.push(codec.mimeType.replace('video/', ''));
+  if (video.qualityLimitationReason && video.qualityLimitationReason !== 'none') {
+    bits.push('limited by ' + video.qualityLimitationReason);
+  }
+  if (typeof video.powerEfficientEncoder === 'boolean') {
+    bits.push(video.powerEfficientEncoder ? 'hardware encoder' : 'software encoder');
+  }
+  let text = 'Encoding: ' + (bits.join(' \u00b7 ') || 'starting…');
+  if (cast.pcs.size > 1) text += ' \u2044 ' + cast.pcs.size + ' encoders (one per viewer)';
+  el.textContent = text;
+}
+
 // Remove a viewer's peer connection. Viewers reconnect with a fresh attempt
 // id, so dropping the old, dead one keeps the count (and CPU use) accurate.
 function dropViewer(aid, reason) {
@@ -1073,9 +1131,14 @@ async function startBroadcast() {
     : 'Broadcasting — tell viewers to add this server\u2019s address on their page.';
 
   applyQuality().catch(() => {});
-  // Keep the absolute resolution current if the shared window is resized.
+  // Refresh the quality label and the encoding stats (skip work when hidden).
   clearInterval(cast.uiTimer);
-  cast.uiTimer = setInterval(updateQualityLabel, 2000);
+  cast.uiTimer = setInterval(() => {
+    if (document.hidden) return;
+    updateQualityLabel();
+    updatePerf();
+  }, 2000);
+  updatePerf();
 
   const offersToken = { stopped: false };
   const iceToken = { stopped: false };
@@ -1232,6 +1295,10 @@ function stopBroadcast() {
     cast.stream = null;
   }
   updateQualityLabel();
+  perf.pc = null;
+  perf.bytes = 0;
+  perf.ts = 0;
+  $('perf').textContent = '';
   post('/signal/announce', { sid: null }).catch(() => {});
   $('preview').srcObject = null;
   $('preview').style.display = 'none';
@@ -1275,6 +1342,25 @@ for (const id of ['resolution', 'fps', 'bitrate']) {
 }
 updateQualityLabel();
 window.addEventListener('resize', updateQualityLabel);
+
+// Weak machines can't afford the default encode/decode load, so start lower:
+// 25% of the screen, 15 fps, ~500 kbps (and ask for the same as a viewer).
+function applyLowEndDefaults() {
+  const cores = navigator.hardwareConcurrency || 8;
+  const mem = navigator.deviceMemory || 8;
+  if (cores > 4 && mem > 4) return;
+  const res = 25;
+  const fpsIndex = 0;
+  const bitrate = bitrateToSlider(500000);
+  $('resolution').value = res;
+  $('fps').value = fpsIndex;
+  $('bitrate').value = bitrate;
+  $('wantResolution').value = res;
+  $('wantFps').value = fpsIndex;
+  $('wantBitrate').value = bitrate;
+}
+applyLowEndDefaults();
+updateQualityLabel();
 
 $('allowWants').addEventListener('change', () => {
   const on = wantsAllowed();
