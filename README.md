@@ -54,7 +54,10 @@ address — they can open the page served by the broadcaster
   and each connection gets the **minimum** of your wish and the broadcaster's
   own settings — you can only ask for less, never more. Lowering it cuts
   decoding/rendering CPU on your machine without affecting other viewers.
-  Default is "max", i.e. exactly what the broadcaster offers.
+  Default is "max", i.e. exactly what the broadcaster offers. The broadcaster
+  can switch the whole wishes system off with **Let viewers request lower
+  quality for themselves** (unchecked = everyone gets the broadcaster's own
+  quality; stored wishes take effect again if it is re-enabled).
 - **Only streams** — the button above the stage hides all controls and expands
   the stage to the whole window, leaving just the stream tiles (handy for a
   clean presentation). Hover a tile to reveal its bar for moving/removing it;

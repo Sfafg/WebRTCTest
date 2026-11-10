@@ -277,6 +277,10 @@
             <span class="muted">Bitrate: <b id="bitrateLabel">1.0 Mbps</b></span>
           </div>
           <input type="range" id="bitrate" min="0" max="1000" step="10" value="350">
+          <label class="muted" style="display:flex; gap:8px; align-items:center; margin-top:10px">
+            <input type="checkbox" id="allowWants" checked>
+            Let viewers request lower quality for themselves
+          </label>
           <div class="muted" id="qualityHint" style="margin-top:8px"></div>
           <div class="muted" style="margin-top:6px">
             Resolution scales the native capture size (100% = full, works for any odd/ultrawide/window size).
@@ -766,7 +770,7 @@ function updateWantLabel() {
   $('wantHint').textContent =
     'Ask for up to ' + pct + '% resolution \u00b7 ' + w.fps + ' fps \u00b7 ' + formatBitrate(w.bitrate) +
     ' for ' + selectedWantLabel() +
-    '. The broadcaster\u2019s own settings cap these; lower them to reduce your CPU/GPU.';
+    '. The broadcaster\u2019s own settings cap these (it may also ignore requests entirely); lower them to reduce your CPU/GPU.';
 }
 
 function bitrateToSlider(bps) {
@@ -1002,8 +1006,15 @@ function dropViewer(aid, reason) {
 
 // What this viewer actually gets: its wish, capped by the broadcaster's own
 // settings per dimension (never more than the broadcaster sends to anyone).
+// The broadcaster can switch the whole wishes system off.
+function wantsAllowed() {
+  const el = $('allowWants');
+  return !el || el.checked;
+}
+
 function effectiveSettings(aid) {
   const base = currentSettings();
+  if (!wantsAllowed()) return base;
   const want = cast.prefs.get(aid);
   if (!want) return base;
   return {
@@ -1264,6 +1275,15 @@ for (const id of ['resolution', 'fps', 'bitrate']) {
 }
 updateQualityLabel();
 window.addEventListener('resize', updateQualityLabel);
+
+$('allowWants').addEventListener('change', () => {
+  const on = wantsAllowed();
+  log(on ? 'Viewer quality requests enabled.' : 'Viewer quality requests blocked.');
+  if (!cast.running) return;
+  // Re-apply to everyone: ignoring wishes restores the broadcaster's own
+  // quality; allowing them restores each viewer's stored wish.
+  for (const [aid, pc] of cast.pcs) applyViewerQuality(aid, pc);
+});
 
 for (const id of ['wantResolution', 'wantFps', 'wantBitrate']) {
   $(id).addEventListener('input', () => {
