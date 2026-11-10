@@ -1,0 +1,350 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WebRTC Screen Share</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    display: flex;
+    justify-content: center;
+    padding: 32px 16px;
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    background: #101418;
+    color: #e8e8e8;
+  }
+  .card { width: 100%; max-width: 760px; }
+  h1 { font-size: 1.35rem; margin: 0 0 4px; }
+  .muted { color: #8b98a5; font-size: 0.85rem; }
+  .modes { display: flex; gap: 12px; margin: 20px 0 14px; }
+  .modes label {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 12px 14px;
+    border: 1px solid #2c343d;
+    border-radius: 10px;
+    cursor: pointer;
+    user-select: none;
+  }
+  .modes label.active { border-color: #4f9cf9; background: #14212e; }
+  input[type="text"] {
+    width: 100%;
+    padding: 10px 12px;
+    margin: 8px 0 12px;
+    border: 1px solid #2c343d;
+    border-radius: 10px;
+    background: #161b21;
+    color: #e8e8e8;
+    font-size: 1rem;
+  }
+  button {
+    padding: 10px 18px;
+    border: 0;
+    border-radius: 10px;
+    background: #2f81f7;
+    color: #fff;
+    font-size: 1rem;
+    cursor: pointer;
+  }
+  button:disabled { opacity: 0.45; cursor: default; }
+  #stopBtn { background: #c0392b; margin-top: 4px; }
+  video {
+    display: none;
+    width: 100%;
+    margin-top: 18px;
+    border-radius: 10px;
+    background: #000;
+  }
+  #status { margin-top: 14px; font-size: 1rem; }
+  #log {
+    margin-top: 8px;
+    max-height: 130px;
+    overflow: auto;
+    white-space: pre-wrap;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.78rem;
+    color: #7fa87f;
+  }
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>WebRTC Screen Share</h1>
+    <div class="muted" id="myAddr">Detecting your address…</div>
+
+    <div class="modes">
+      <label id="modeWatchLabel"><input type="radio" name="mode" value="watch" checked> Watch a broadcast</label>
+      <label id="modeCastLabel"><input type="radio" name="mode" value="broadcast"> Broadcast my screen</label>
+    </div>
+
+    <div id="watchPane">
+      <div class="muted">Enter the address of the machine that is broadcasting to you.</div>
+      <input type="text" id="watchAddr" placeholder="e.g. 192.168.1.20:8080" autocomplete="off" spellcheck="false">
+      <button id="watchBtn">Watch</button>
+    </div>
+
+    <div id="castPane" hidden>
+      <div class="muted">Enter the address of the machine that should watch you.</div>
+      <input type="text" id="castAddr" placeholder="e.g. 192.168.1.30:8080" autocomplete="off" spellcheck="false">
+      <button id="castBtn">Choose what to share &amp; broadcast</button>
+      <div class="muted" style="margin-top:8px">
+        Note: browsers only allow screen capture on localhost/HTTPS pages —
+        open this page as <b>http://localhost:8080</b> on the broadcasting machine.
+      </div>
+    </div>
+
+    <button id="stopBtn" hidden>Stop</button>
+
+    <video id="video" autoplay playsinline controls></video>
+    <div id="status"></div>
+    <div id="log"></div>
+  </div>
+
+<script>
+'use strict';
+
+const ICE_SERVERS = [{ urls: ['stun:stun.l.google.com:19302'] }];
+const POLL_MS = 600;
+const PAGE_ID = Math.random().toString(36).slice(2); // to skip our own ICE candidates
+
+const $ = (id) => document.getElementById(id);
+const video = $('video');
+let pc = null;
+let running = false;
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const setStatus = (msg) => { $('status').textContent = msg; };
+
+function log(msg) {
+  const el = $('log');
+  el.textContent += '[' + new Date().toLocaleTimeString() + '] ' + msg + '\n';
+  el.scrollTop = el.scrollHeight;
+}
+
+function normalizeAddress(input) {
+  let a = input.trim().replace(/^https?:\/\//i, '').replace(/\/+$/, '');
+  if (!a) throw new Error('Enter an address first.');
+  if (!a.includes(':')) a += ':8080';
+  return 'http://' + a;
+}
+
+async function post(url, obj) {
+  const r = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(obj),
+  });
+  if (!r.ok) throw new Error('POST ' + url + ' failed with ' + r.status);
+}
+
+async function getJSON(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error('GET ' + url + ' failed with ' + r.status);
+  return r.json();
+}
+
+// Store one of OUR signaling messages on OUR OWN server; the other side
+// polls our server for it (they typed our address).
+const putSignal = (path, obj) => post(path, obj);
+
+// Poll the PEER's server (the address we typed) until `pick` returns a value.
+// Retries briefly if the peer is unreachable, then gives up.
+async function pollJSONUntil(url, pick) {
+  let errors = 0;
+  while (running) {
+    try {
+      const data = await getJSON(url);
+      errors = 0;
+      const val = pick(data);
+      if (val !== undefined && val !== null) return val;
+    } catch (err) {
+      if (errors === 0) log('Cannot reach peer yet (' + err.message + '), retrying…');
+      if (++errors > 20) throw err;
+    }
+    await sleep(POLL_MS);
+  }
+  return null;
+}
+
+// Trickle ICE: read the peer's candidates from THEIR server and apply them.
+async function pollRemoteIce(peer) {
+  let since = 0;
+  const pending = [];
+  while (running) {
+    try {
+      const { candidates, next } = await getJSON(peer + '/signal/ice?since=' + since);
+      since = next;
+      pending.push(...candidates.filter((c) => c.from !== PAGE_ID));
+    } catch (_) { /* peer briefly unreachable; keep polling */ }
+    while (pending.length && pc && pc.remoteDescription) {
+      const c = pending.shift();
+      try { await pc.addIceCandidate(c); }
+      catch (err) { log('addIceCandidate failed: ' + err.message); }
+    }
+    await sleep(POLL_MS);
+  }
+}
+
+function attachCommon(pc) {
+  pc.onicecandidate = (e) => {
+    if (e.candidate) putSignal('/signal/ice', Object.assign(e.candidate.toJSON(), { from: PAGE_ID }));
+  };
+  pc.onconnectionstatechange = () => {
+    const s = pc && pc.connectionState;
+    if (s === 'connected') setStatus('Connected.');
+    else if (s === 'failed') setStatus('Connection failed.');
+    else if (s === 'disconnected' || s === 'closed') setStatus('Disconnected.');
+  };
+}
+
+// ---------------- Broadcaster ----------------
+
+async function startBroadcast(peer) {
+  // The browser shows its native picker: entire screen, window or browser tab.
+  const stream = await navigator.mediaDevices.getDisplayMedia({
+    video: { frameRate: 30 },
+    audio: true,
+  });
+
+  stream.getVideoTracks()[0].addEventListener('ended', () => {
+    log('Screen sharing ended.');
+    stopSession();
+    setStatus('Stopped sharing.');
+  });
+
+  pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+  for (const track of stream.getTracks()) pc.addTrack(track, stream);
+  attachCommon(pc);
+
+  // Local preview of what is being sent.
+  video.srcObject = stream;
+  video.muted = true;
+  video.style.display = 'block';
+
+  await pc.setLocalDescription(await pc.createOffer());
+  await putSignal('/signal/offer', pc.localDescription);
+  log('Offer published — waiting for the viewer…');
+  setStatus('Waiting for viewer…');
+
+  const answer = await pollJSONUntil(peer + '/signal/answer', (d) => d.data);
+  if (!running || !pc || !answer) return;
+
+  await pc.setRemoteDescription(answer);
+  log('Received the viewer\u2019s answer.');
+  setStatus('Connecting…');
+
+  await pollRemoteIce(peer);
+}
+
+// ---------------- Viewer ----------------
+
+async function startWatching(peer) {
+  pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+  attachCommon(pc);
+  pc.ontrack = (e) => {
+    video.srcObject = e.streams[0];
+    video.muted = false;
+    video.style.display = 'block';
+    setStatus('Receiving broadcast…');
+  };
+
+  setStatus('Waiting for the broadcaster…');
+  const offer = await pollJSONUntil(peer + '/signal/offer', (d) => d.data);
+  if (!running || !pc || !offer) return;
+
+  log('Received offer from the broadcaster.');
+  await pc.setRemoteDescription(offer);
+  await pc.setLocalDescription(await pc.createAnswer());
+  await putSignal('/signal/answer', pc.localDescription);
+  log('Answer published.');
+  setStatus('Connecting…');
+
+  await pollRemoteIce(peer);
+}
+
+// ---------------- UI wiring ----------------
+
+function beginSession() {
+  running = true;
+  $('watchBtn').disabled = true;
+  $('castBtn').disabled = true;
+  $('stopBtn').hidden = false;
+  $('log').textContent = '';
+  setStatus('');
+}
+
+function stopSession() {
+  running = false;
+  if (pc) { try { pc.close(); } catch (_) {} pc = null; }
+  video.srcObject = null;
+  video.style.display = 'none';
+  $('watchBtn').disabled = false;
+  $('castBtn').disabled = false;
+  $('stopBtn').hidden = true;
+}
+
+function fail(err) {
+  stopSession();
+  setStatus('Error: ' + ((err && err.message) || err));
+  log('Error: ' + ((err && err.message) || err));
+}
+
+$('watchBtn').addEventListener('click', async () => {
+  let peer;
+  try { peer = normalizeAddress($('watchAddr').value); }
+  catch (err) { return fail(err); }
+  beginSession();
+  try { await startWatching(peer); }
+  catch (err) { fail(err); }
+});
+
+$('castBtn').addEventListener('click', async () => {
+  let peer;
+  try { peer = normalizeAddress($('castAddr').value); }
+  catch (err) { return fail(err); }
+  beginSession();
+  try { await startBroadcast(peer); }
+  catch (err) {
+    if (err && err.name === 'NotAllowedError') {
+      log('Screen selection cancelled.');
+      stopSession();
+    } else {
+      fail(err);
+    }
+  }
+});
+
+$('stopBtn').addEventListener('click', () => {
+  stopSession();
+  setStatus('Stopped.');
+});
+
+function updatePanes() {
+  const mode = document.querySelector('input[name="mode"]:checked').value;
+  $('watchPane').hidden = mode !== 'watch';
+  $('castPane').hidden = mode !== 'broadcast';
+  $('modeWatchLabel').classList.toggle('active', mode === 'watch');
+  $('modeCastLabel').classList.toggle('active', mode === 'broadcast');
+}
+document.querySelectorAll('input[name="mode"]').forEach((r) => r.addEventListener('change', updatePanes));
+updatePanes();
+
+// Show this machine's address so the other person knows what to type.
+fetch('/my-address')
+  .then((r) => r.json())
+  .then((info) => {
+    const addrs = info.ips.map((ip) => ip + ':' + info.port);
+    $('myAddr').textContent = addrs.length
+      ? 'Your address (give it to the other person):  ' + addrs.join('   or   ')
+      : 'Could not detect a LAN address. Server port: ' + info.port;
+  })
+  .catch(() => { $('myAddr').textContent = ''; });
+</script>
+</body>
+</html>

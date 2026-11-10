@@ -1,0 +1,12 @@
+{
+  "name": "webrtc-screen-share",
+  "version": "1.0.0",
+  "description": "Tiny dependency-free WebRTC screen share: broadcast your screen to a peer or watch their broadcast by address.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=14"
+  }
+}
